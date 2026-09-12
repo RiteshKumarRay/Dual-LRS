@@ -34,6 +34,8 @@ TdmEngine tdm(radio, CURRENT_ROLE);
 static uint8_t rfTxBuffer[MAX_PAYLOAD_PER_SLOT];
 static uint32_t lastLedToggleMs = 0;
 static uint32_t lastStatusInjectMs = 0;
+static uint32_t lastBeaconMs = 0;
+static bool sentThisSlot = false;
 
 // Callback when packet is received from RF
 void onRadioPacketReceived(LrsPacketType type, const uint8_t* payload, uint8_t length) {
@@ -61,6 +63,8 @@ void setup() {
 }
 
 void loop() {
+    uint32_t now = millis();
+
     // 1. Read bytes from local MAVLink stream (FC or Mission Planner)
     telemHandler.readFromLocal();
 
@@ -69,17 +73,24 @@ void loop() {
 
     // 3. If it is our turn in the TDM slot and radio is ready, transmit queued data
     if (tdm.canTransmit()) {
-        size_t bytesToSend = telemHandler.getOutboundPayload(rfTxBuffer, sizeof(rfTxBuffer));
-        if (bytesToSend > 0) {
-            tdm.sendPacket(LrsPacketType::MAVLINK_DATA, rfTxBuffer, (uint8_t)bytesToSend);
-        } else {
-            // If no data queued, send a sync / beacon frame to keep timing locked
-            tdm.sendPacket(LrsPacketType::HEARTBEAT_SYNC, nullptr, 0);
+        if (!sentThisSlot) {
+            size_t bytesToSend = telemHandler.getOutboundPayload(rfTxBuffer, sizeof(rfTxBuffer));
+            if (bytesToSend > 0) {
+                tdm.sendPacket(LrsPacketType::MAVLINK_DATA, rfTxBuffer, (uint8_t)bytesToSend);
+                sentThisSlot = true;
+            } else if (now - lastBeaconMs >= TDM_FRAME_PERIOD_MS) {
+                // Send one sync beacon per frame when idle (not every loop iteration)
+                tdm.sendPacket(LrsPacketType::HEARTBEAT_SYNC, nullptr, 0);
+                lastBeaconMs = now;
+                sentThisSlot = true;
+            }
         }
+    } else {
+        // Reset the flag when we leave our transmit slot
+        sentThisSlot = false;
     }
 
     // 4. Inject standard MAVLink RADIO_STATUS packet to local GCS/FC (1 Hz)
-    uint32_t now = millis();
     if (now - lastStatusInjectMs >= 1000) {
         lastStatusInjectMs = now;
         const LinkStats& stats = tdm.getStats();

@@ -204,10 +204,7 @@ void TdmEngine::processIncomingRadioData() {
                         if (_role == NodeRole::AIR) {
                             // Ground slot occurs at (TDM_AIR_SLOT_MS + TDM_GUARD_GAP1_MS)
                             uint32_t expectedGroundOffsetUs = (TDM_AIR_SLOT_MS + TDM_GUARD_GAP1_MS) * 1000;
-                            uint32_t nowUs = micros();
-                            if (nowUs >= expectedGroundOffsetUs) {
-                                _frameStartTimeUs = nowUs - expectedGroundOffsetUs;
-                            }
+                            _frameStartTimeUs = micros() - expectedGroundOffsetUs;
                         }
 
                         // Check sequence loss

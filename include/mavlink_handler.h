@@ -29,7 +29,6 @@ public:
     MavlinkHandler(Stream& localSerial);
 
     void begin();
-    void update();
 
     // Read bytes from local port (FC or GCS) into the outbound queue
     void readFromLocal();
