@@ -24,6 +24,9 @@
 bench_params.json
 *.log
 
+# Developer context notes
+context.md
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]

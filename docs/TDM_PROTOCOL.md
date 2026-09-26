@@ -56,26 +56,26 @@ The Dual-LRS link uses a master-slave timing hierarchy:
 
 Ground transmits both `HEARTBEAT_SYNC` (0-byte payload) and `MAVLINK_DATA` (1- to 4-byte payload). Because LoRa airtime and UART clocking increase linearly with packet length, Air applies length-compensated arrival calculation:
 
-$$\text{transitDelayUs} = 10200 + (\text{payload\_len} \times 215)\text{ µs}$$
+$$\text{transitDelayUs} = 10200 + (\text{payloadLength} \times 215)\,\mu\text{s}$$
 
-$$\text{expectedArrivalUs} = ((TDM\_AIR\_SLOT\_MS + TDM\_GUARD\_GAP1\_MS) \times 1000) + \text{transitDelayUs}$$
+$$\text{expectedArrivalUs} = ((\text{AirSlotMs} + \text{GuardGap1Ms}) \times 1000) + \text{transitDelayUs}$$
 
-* **0-byte Beacon:** $10,200\text{ µs}$ transit $\rightarrow$ Expected arrival at $45,200\text{ µs}$.
-* **4-byte Payload:** $11,060\text{ µs}$ transit $\rightarrow$ Expected arrival at $46,060\text{ µs}$.
+* **0-byte Beacon:** $10,200\,\mu\text{s}$ transit $\rightarrow$ Expected arrival at $45,200\,\mu\text{s}$.
+* **4-byte Payload:** $11,060\,\mu\text{s}$ transit $\rightarrow$ Expected arrival at $46,060\,\mu\text{s}$.
 
 ### Graduated Slew Control
 
-Air calculates phase error: $\text{err} = \text{targetStartUs} - \text{_frameStartTimeUs}$, wrapped to $[-25000, +25000\text{ µs}]$:
+Air calculates phase error: $\text{err} = \text{targetStartUs} - \text{frameStartTimeUs}$, wrapped to $[-25000, +25000]\,\mu\text{s}$:
 
 | Phase Error ($|\text{err}|$) | Correction Mode | Step Size | Behavior |
 | :--- | :--- | :--- | :--- |
-| $> 3000\text{ µs}$ | Fast Snap | $\text{_frameStartTimeUs} += \text{err}$ | Instant 1-step lock on boot/reconnection |
-| $1000\text{ µs} - 3000\text{ µs}$ | Fast Slew | $\pm 100\text{ µs}$ per frame | Rapid recovery without packet loss |
-| $500\text{ µs} - 1000\text{ µs}$ | Medium Slew | $\pm 25\text{ µs}$ per frame | Smooth convergence |
-| $250\text{ µs} - 500\text{ µs}$ | Micro Slew | $\pm 5\text{ µs}$ per frame | Crystal drift compensation |
-| $< 250\text{ µs}$ | Deadband | $0\text{ µs}$ (no adjustment) | Rejects UART & MCU execution jitter |
+| $> 3000\,\mu\text{s}$ | Fast Snap | $\text{frameStartTimeUs} += \text{err}$ | Instant 1-step lock on boot/reconnection |
+| $1000\,\mu\text{s} - 3000\,\mu\text{s}$ | Fast Slew | $\pm 100\,\mu\text{s}$ per frame | Rapid recovery without packet loss |
+| $500\,\mu\text{s} - 1000\,\mu\text{s}$ | Medium Slew | $\pm 25\,\mu\text{s}$ per frame | Smooth convergence |
+| $250\,\mu\text{s} - 500\,\mu\text{s}$ | Micro Slew | $\pm 5\,\mu\text{s}$ per frame | Crystal drift compensation |
+| $< 250\,\mu\text{s}$ | Deadband | $0\,\mu\text{s}$ (no adjustment) | Rejects UART & MCU execution jitter |
 
-On hardware, Air achieves steady-state phase error of **$\pm 4\text{ µs}$**.
+On hardware, Air achieves steady-state phase error of **$\pm 4\,\mu\text{s}$**.
 
 ---
 
@@ -134,5 +134,5 @@ Byte Index  Field          Type     Description
 * Receiver checks each arriving packet sequence against `last_rx_seq`.
 * Any gap increments `packets_dropped` and `seq_drops`.
 * Link Quality percentage is calculated continuously:
-  $$\text{Link Quality (\%)} = \frac{\text{packets\_received}}{\text{packets\_received} + \text{packets\_dropped}} \times 100$$
+  $$\text{Link Quality (\%)} = \frac{\text{packetsReceived}}{\text{packetsReceived} + \text{packetsDropped}} \times 100$$
 * Mapped into standard MAVLink `RADIO_STATUS` (Message ID 109) and emitted to QGC/Mission Planner at 1 Hz.

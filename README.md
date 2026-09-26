@@ -53,8 +53,8 @@ Because LoRa transceivers are half-duplex, physical transmission alternates acro
 ### B. Length-Compensated Graduated PLL Discipline
 The Air unit acts as a time slave, locking its local microsecond clock to Ground beacons (`HEARTBEAT_SYNC` and `MAVLINK_DATA`).
 * **Transit Delay Compensation:** Calculates physical transit latency based on packet length:
-  $$\text{transitDelayUs} = 10200 + (\text{payload\_len} \times 215)\text{ µs}$$
-* **Graduated Phase Correction:** Uses a non-linear phase-locked loop (PLL) with micro-adjustments ($\pm 5\text{ µs}$) and a $250\text{ µs}$ jitter deadband to eliminate clock drift, maintaining **$\pm 4\text{ µs}$ steady-state phase error** on live hardware.
+  $$\text{transitDelayUs} = 10200 + (\text{payloadLength} \times 215)\,\mu\text{s}$$
+* **Graduated Phase Correction:** Uses a non-linear phase-locked loop (PLL) with micro-adjustments ($\pm 5\,\mu\text{s}$) and a $250\,\mu\text{s}$ jitter deadband to eliminate clock drift, maintaining **$\pm 4\,\mu\text{s}$ steady-state phase error** on live hardware.
 
 ### C. Traffic Prioritization & Congestion Control
 * **Ground Load Shedding:** Automatically drops QGC `TIMESYNC` (msgid 111) at Ground ingest, eliminating ~280 B/s of useless latency overhead.
