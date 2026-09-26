@@ -118,9 +118,9 @@ void MavlinkHandler::begin() {
     _pendingStatusReady = false;
     _hbPending = false;
     _hbLen = 0;
-    _stPending = false;
-    _stSending = false;
-    _stLen = 0;
+    _urgentPending = false;
+    _urgentSending = false;
+    _urgentLen = 0;
     _gndFrameBufLen = 0;
 }
 
@@ -222,13 +222,13 @@ void MavlinkHandler::readFromLocal() {
                         _rxIndex = 0;
                         continue;
                     }
-                } else if (msgid == 253) {
-                    // Air: High-priority STATUSTEXT bypass (mode changes jump to front of FIFO)
-                    if (!_stPending && _rxExpectedLen <= sizeof(_stCache)) {
-                        memcpy(_stCache, _rxBuffer, _rxExpectedLen);
-                        _stLen = (uint8_t)_rxExpectedLen;
-                        _stPending = true;
-                        _stSending = false;
+                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 47 || msgid == 77 || msgid == 148) {
+                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT, MISSION_ACK, COMMAND_ACK jump to front)
+                    if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
+                        memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
+                        _urgentLen = (uint8_t)_rxExpectedLen;
+                        _urgentPending = true;
+                        _urgentSending = false;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
                         continue;
@@ -368,13 +368,13 @@ void MavlinkHandler::readFromLocal() {
                         _rxIndex = 0;
                         continue;
                     }
-                } else if (msgid == 253) {
-                    // Air: High-priority STATUSTEXT bypass (mode changes jump to front of FIFO)
-                    if (!_stPending && _rxExpectedLen <= sizeof(_stCache)) {
-                        memcpy(_stCache, _rxBuffer, _rxExpectedLen);
-                        _stLen = (uint8_t)_rxExpectedLen;
-                        _stPending = true;
-                        _stSending = false;
+                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 47 || msgid == 77 || msgid == 148) {
+                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT, MISSION_ACK, COMMAND_ACK jump to front)
+                    if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
+                        memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
+                        _urgentLen = (uint8_t)_rxExpectedLen;
+                        _urgentPending = true;
+                        _urgentSending = false;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
                         continue;
@@ -474,7 +474,7 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
 
     size_t avail = _txQueue.available();
 #if defined(DUAL_LRS_ROLE_AIR)
-    if (avail == 0 && !_hbPending && !_stPending && _fragmentRemaining == 0) {
+    if (avail == 0 && !_hbPending && !_urgentPending && _fragmentRemaining == 0) {
         return 0;
     }
 #else
@@ -493,17 +493,17 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
     }
 
 #if defined(DUAL_LRS_ROLE_AIR)
-    // 1. If a multi-slot STATUSTEXT transmission is already in progress, finish it first!
-    if (_stSending && _stPending && _stLen > 0) {
-        size_t toSend = (_stLen < maxLen) ? _stLen : maxLen;
-        memcpy(dest, _stCache, toSend);
-        if (toSend < _stLen) {
-            memmove(_stCache, _stCache + toSend, _stLen - toSend);
-            _stLen -= (uint8_t)toSend;
+    // 1. If an urgent response multi-slot transmission is already in progress, finish it first!
+    if (_urgentSending && _urgentPending && _urgentLen > 0) {
+        size_t toSend = (_urgentLen < maxLen) ? _urgentLen : maxLen;
+        memcpy(dest, _urgentCache, toSend);
+        if (toSend < _urgentLen) {
+            memmove(_urgentCache, _urgentCache + toSend, _urgentLen - toSend);
+            _urgentLen -= (uint8_t)toSend;
         } else {
-            _stPending = false;
-            _stLen = 0;
-            _stSending = false;
+            _urgentPending = false;
+            _urgentLen = 0;
+            _urgentSending = false;
         }
         return toSend;
     }
@@ -522,18 +522,18 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
         return toSend;
     }
 
-    // 3. High-priority STATUSTEXT bypass: start sending pending STATUSTEXT
-    if (_stPending && _stLen > 0) {
-        _stSending = true;
-        size_t toSend = (_stLen < maxLen) ? _stLen : maxLen;
-        memcpy(dest, _stCache, toSend);
-        if (toSend < _stLen) {
-            memmove(_stCache, _stCache + toSend, _stLen - toSend);
-            _stLen -= (uint8_t)toSend;
+    // 3. High-priority urgent response bypass: start sending pending urgent response (MISSION_COUNT, COMMAND_ACK, STATUSTEXT)
+    if (_urgentPending && _urgentLen > 0) {
+        _urgentSending = true;
+        size_t toSend = (_urgentLen < maxLen) ? _urgentLen : maxLen;
+        memcpy(dest, _urgentCache, toSend);
+        if (toSend < _urgentLen) {
+            memmove(_urgentCache, _urgentCache + toSend, _urgentLen - toSend);
+            _urgentLen -= (uint8_t)toSend;
         } else {
-            _stPending = false;
-            _stLen = 0;
-            _stSending = false;
+            _urgentPending = false;
+            _urgentLen = 0;
+            _urgentSending = false;
         }
         return toSend;
     }

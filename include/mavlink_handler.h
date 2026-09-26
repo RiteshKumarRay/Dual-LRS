@@ -119,11 +119,11 @@ private:
     uint8_t  _hbLen = 0;
     bool     _hbPending = false;
 
-    // High-priority STATUSTEXT cache (bypasses FIFO queue so RC mode changes display immediately in QGC)
-    uint8_t  _stCache[80];
-    uint8_t  _stLen = 0;
-    bool     _stPending = false;
-    bool     _stSending = false;
+    // High-priority urgent response cache (bypasses 48KB param queue on Air: STATUSTEXT, MISSION_COUNT, COMMAND_ACK)
+    uint8_t  _urgentCache[128];
+    uint8_t  _urgentLen = 0;
+    bool     _urgentPending = false;
+    bool     _urgentSending = false;
 
     // Ground frame assembly buffer: guarantees only complete MAVLink frames are written to GCS
     uint8_t  _gndFrameBuf[296];
