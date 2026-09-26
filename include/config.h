@@ -91,7 +91,7 @@
 #define TELEM_BUFFER_SIZE         1024  // 1KB FIFO buffer on Ground: bounds latency to < 10 seconds under worst-case storm
 #endif
 #define MAX_PAYLOAD_AIR_SLOT      40  // 1 full MAVLink frame per slot (up to 40B): fits in 31ms air slot
-#define MAX_PAYLOAD_GROUND_SLOT    6  // 6B: 13B on-air frame finishes in ~12.8ms (by 47.8ms), leaving 2.2ms safety margin before 50ms wrap
+#define MAX_PAYLOAD_GROUND_SLOT   10  // 10B: 17B on-air frame finishes in ~5.2ms (by 40.2ms), leaving 6.8ms safety margin before 47ms slot end
 #define MAX_PAYLOAD_PER_SLOT      64 // Frame buffer allocation (5B header + 40B payload + 2B CRC = 47B)
 
 // Protocol Magic Bytes

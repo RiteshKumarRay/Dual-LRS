@@ -222,8 +222,8 @@ void MavlinkHandler::readFromLocal() {
                         _rxIndex = 0;
                         continue;
                     }
-                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 47 || msgid == 77 || msgid == 148) {
-                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT, MISSION_ACK, COMMAND_ACK jump to front)
+                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 77 || msgid == 148) {
+                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK jump to front)
                     if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
                         memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
                         _urgentLen = (uint8_t)_rxExpectedLen;
@@ -300,6 +300,17 @@ void MavlinkHandler::readFromLocal() {
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
                     continue;
+                } else if (msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 23 || msgid == 76) {
+                    // Ground: High-priority urgent uplink bypass (mission upload items, parameter writes, commands jump to front)
+                    if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
+                        memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
+                        _urgentLen = (uint8_t)_rxExpectedLen;
+                        _urgentPending = true;
+                        _urgentSending = false;
+                        _rxState = RxState::IDLE;
+                        _rxIndex = 0;
+                        continue;
+                    }
                 }
 
                 // Ground Unit: GCS uplink commands, parameter requests, mission items
@@ -368,8 +379,8 @@ void MavlinkHandler::readFromLocal() {
                         _rxIndex = 0;
                         continue;
                     }
-                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 47 || msgid == 77 || msgid == 148) {
-                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT, MISSION_ACK, COMMAND_ACK jump to front)
+                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 77 || msgid == 148) {
+                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK jump to front)
                     if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
                         memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
                         _urgentLen = (uint8_t)_rxExpectedLen;
@@ -446,6 +457,17 @@ void MavlinkHandler::readFromLocal() {
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
                     continue;
+                } else if (msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 23 || msgid == 76) {
+                    // Ground: High-priority urgent uplink bypass (mission upload items, parameter writes, commands jump to front)
+                    if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
+                        memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
+                        _urgentLen = (uint8_t)_rxExpectedLen;
+                        _urgentPending = true;
+                        _urgentSending = false;
+                        _rxState = RxState::IDLE;
+                        _rxIndex = 0;
+                        continue;
+                    }
                 }
 
                 // Ground Unit: GCS uplink commands, parameter requests, mission items
@@ -473,15 +495,9 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
     if (dest == nullptr || maxLen == 0) return 0;
 
     size_t avail = _txQueue.available();
-#if defined(DUAL_LRS_ROLE_AIR)
     if (avail == 0 && !_hbPending && !_urgentPending && _fragmentRemaining == 0) {
         return 0;
     }
-#else
-    if (avail == 0 && !_hbPending && _fragmentRemaining == 0) {
-        return 0;
-    }
-#endif
 
     // If we are currently continuing a fragmented multi-slot packet (> maxLen) from _txQueue
     if (_fragmentRemaining > 0) {
@@ -492,8 +508,7 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
         return popped;
     }
 
-#if defined(DUAL_LRS_ROLE_AIR)
-    // 1. If an urgent response multi-slot transmission is already in progress, finish it first!
+    // 1. If an urgent multi-slot transmission is already in progress, finish it first!
     if (_urgentSending && _urgentPending && _urgentLen > 0) {
         size_t toSend = (_urgentLen < maxLen) ? _urgentLen : maxLen;
         memcpy(dest, _urgentCache, toSend);
@@ -522,7 +537,9 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
         return toSend;
     }
 
-    // 3. High-priority urgent response bypass: start sending pending urgent response (MISSION_COUNT, COMMAND_ACK, STATUSTEXT)
+    // 3. High-priority urgent bypass: start sending pending urgent packet
+    //    Air: STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK
+    //    Ground: MISSION_ITEM, MISSION_COUNT, PARAM_SET, COMMAND_LONG
     if (_urgentPending && _urgentLen > 0) {
         _urgentSending = true;
         size_t toSend = (_urgentLen < maxLen) ? _urgentLen : maxLen;
@@ -537,21 +554,6 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
         }
         return toSend;
     }
-#else
-    // Ground: Fragment-aware Heartbeat bypass (4-byte slot sends ~17-23B heartbeat over ~5 slots)
-    if (_hbPending && _hbLen > 0) {
-        size_t toSend = (_hbLen < maxLen) ? _hbLen : maxLen;
-        memcpy(dest, _hbCache, toSend);
-        if (toSend < _hbLen) {
-            memmove(_hbCache, _hbCache + toSend, _hbLen - toSend);
-            _hbLen -= (uint8_t)toSend;
-        } else {
-            _hbPending = false;
-            _hbLen = 0;
-        }
-        return toSend;
-    }
-#endif
 
     size_t packedBytes = 0;
 
