@@ -8,10 +8,19 @@ void E22Driver::begin(uint32_t baudRate) {
     pinMode(_pinM1, OUTPUT);
     pinMode(_pinAux, INPUT_PULLUP);
 
+    // Auto-configure the Ebyte E22 hardware registers:
+    // Sets UART to 115200 baud, Air Data Rate to 62.5 kbps, and RF Power to 21 dBm (125 mW)
+    configureRadio(E22_ACTIVE_TX_POWER, 0x17);
+
     // Default to Normal Operating Mode
     setMode(E22Mode::NORMAL);
 
+    _serial.end();
+#if defined(ESP32)
+    _serial.begin(baudRate, SERIAL_8N1, PIN_RADIO_RX, PIN_RADIO_TX);
+#else
     _serial.begin(baudRate);
+#endif
     waitForReady(200);
 }
 
@@ -28,11 +37,11 @@ void E22Driver::setMode(E22Mode mode) {
             digitalWrite(_pinM0, HIGH);
             digitalWrite(_pinM1, LOW);
             break;
-        case E22Mode::WOR_RECEIVE:
+        case E22Mode::CONFIG:
             digitalWrite(_pinM0, LOW);
             digitalWrite(_pinM1, HIGH);
             break;
-        case E22Mode::SLEEP_CONFIG:
+        case E22Mode::SLEEP:
             digitalWrite(_pinM0, HIGH);
             digitalWrite(_pinM1, HIGH);
             break;
@@ -42,6 +51,73 @@ void E22Driver::setMode(E22Mode mode) {
     // Ebyte datasheet specifies >= 2ms delay after mode switch
     delay(5);
     waitForReady(100);
+}
+
+bool E22Driver::configureRadio(uint8_t powerLevel, uint8_t channel) {
+    // Switch to Configuration Mode (M0=LOW, M1=HIGH)
+    setMode(E22Mode::CONFIG);
+    delay(40);
+    waitForReady(200);
+
+    // In config mode, E22 communicates at 9600 baud 8N1
+    _serial.end();
+#if defined(ESP32)
+    _serial.begin(9600, SERIAL_8N1, PIN_RADIO_RX, PIN_RADIO_TX);
+#else
+    _serial.begin(9600);
+#endif
+    delay(40);
+
+    while (_serial.available()) _serial.read();
+
+    // Configuration packet:
+    // C0: Write and save to EEPROM
+    // 00: Starting address
+    // 07: Length 7 bytes (covers ADDH, ADDL, NETID, REG0, REG1, REG2, REG3)
+    // ADDH: 0x00, ADDL: 0x00, NETID: 0x00
+    // REG0: 0xE7 (115200 baud, 8N1, 62.5k air data rate)
+    // REG1: 0x80 | (powerLevel & 0x03) (64 byte sub-packet, 03 = 21dBm bench power, 00 = 30dBm flight power)
+    // REG2: channel (default 0x17 = channel 23)
+    // REG3: 0x00 (bit 7: RSSI byte disabled [0], bit 6: transparent mode [0], bit 4: LBT disabled [0])
+    uint8_t cfgCmd[] = {
+        0xC0, 0x00, 0x07,
+        0x00, 0x00, 0x00,
+        0xE7,
+        (uint8_t)(0x80 | (powerLevel & 0x03)),
+        channel,
+        0x00
+    };
+
+    waitForReady(100);
+    _serial.write(cfgCmd, sizeof(cfgCmd));
+    _serial.flush();
+    delay(50);
+
+    uint8_t resp[16];
+    size_t respLen = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 300 && respLen < sizeof(resp)) {
+        if (_serial.available()) {
+            resp[respLen++] = (uint8_t)_serial.read();
+        } else {
+            delay(5);
+        }
+    }
+
+    bool success = (respLen >= 4 && resp[0] == 0xC1);
+    _configured = success;
+    _lastRespLen = respLen;
+    if (respLen > 0) {
+        memcpy(_lastResp, resp, (respLen < sizeof(_lastResp) ? respLen : sizeof(_lastResp)));
+    }
+
+    _serial.end();
+
+    // Switch back to Normal operating mode
+    setMode(E22Mode::NORMAL);
+    delay(40);
+
+    return success;
 }
 
 bool E22Driver::isBusy() const {

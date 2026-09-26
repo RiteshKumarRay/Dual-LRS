@@ -1,8 +1,39 @@
+# PlatformIO build artifacts
 .pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE and Editor configurations
 .vscode/
 .idea/
+*.iml
+*.sublime-project
+*.sublime-workspace
+
+# Compiled binaries and object files
 *.bin
 *.elf
 *.hex
 *.o
 *.d
+*.a
+*.so
+*.dylib
+
+# Temporary benchmark outputs and logs
+bench_params.json
+*.log
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Agent knowledge graph cache
+graphify-out/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+*~

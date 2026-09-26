@@ -33,16 +33,36 @@ The Air Unit connects to the Flight Controller's `TELEM1` or `TELEM2` port:
 
 ---
 
-## 3. Ground Unit: BlackPill to Laptop (Mission Planner)
+## 3. Ground Unit: BlackPill or ESP32 to Computer (QGroundControl / Mission Planner)
 
-The Ground Unit can connect to your laptop in two ways:
-1. **USB-C Cable directly to Laptop** (Recommended):
+### Option A: STM32F411 BlackPill Ground Unit
+1. **USB-C Cable directly to Computer** (Recommended):
    - The BlackPill's onboard USB-C port runs in **USB CDC (Virtual COM Port)** mode.
-   - Simply plug a USB-C cable from the BlackPill into your laptop.
-   - Windows will detect it as `COMx (STM32 Virtual COM Port)`.
-   - In Mission Planner, select this COM port and `115200` baud.
+   - Simply plug a USB-C cable from the BlackPill into your computer.
+   - Windows/Linux will detect it as `COMx` / `/dev/ttyACM0` (STM32 Virtual COM Port).
+   - In QGC or Mission Planner, select this COM port and `115200` baud.
 2. **External USB-UART FTDI / CP2102** (Optional):
    - Connect **PA2** (USART2_TX) to FTDI RX and **PA3** (USART2_RX) to FTDI TX.
+
+---
+
+### Option B: ESP32-WROOM-32 Ground Unit
+When using an ESP32 board for the Ground Station:
+
+| Ebyte E22-900T30D Pin | Function | ESP32 Pin | Description |
+| :--- | :--- | :--- | :--- |
+| **Pin 1 (M0)** | Operating Mode Control 0 | **GPIO 21** | Output |
+| **Pin 2 (M1)** | Operating Mode Control 1 | **GPIO 22** | Output |
+| **Pin 3 (RXD)** | UART Data Input | **GPIO 17** (TX2) | 3.3V Logic. Data from ESP32 to E22 |
+| **Pin 4 (TXD)** | UART Data Output | **GPIO 16** (RX2) | 3.3V Logic. Data from E22 to ESP32 |
+| **Pin 5 (AUX)** | Radio Status / Busy | **GPIO 19** | Input with pull-up. LOW = Busy |
+| **Pin 6 (VCC)** | Power Supply (3.3V - 5.5V) | **5V / VIN** | From USB 5V rail (+ bulk capacitor) |
+| **Pin 7 (GND)** | Ground | **GND** | Common Ground |
+
+**Computer Connection for ESP32:**
+- Plug the ESP32 directly into the computer via Micro-USB or USB-C.
+- It enumerates via its onboard CP2102 or CH340 chip (`COMx` or `/dev/ttyUSB0`).
+- In QGroundControl or Mission Planner, select `115200` baud and connect.
 
 ---
 

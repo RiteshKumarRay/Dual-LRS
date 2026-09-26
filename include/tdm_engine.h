@@ -34,10 +34,14 @@ struct LinkStats {
     uint32_t packets_sent = 0;
     uint32_t packets_received = 0;
     uint32_t packets_dropped = 0;
+    uint32_t crc_errors = 0;
+    uint32_t seq_drops = 0;
     uint8_t  last_rx_seq = 0;
     uint8_t  link_quality = 100; // 0-100%
     uint32_t last_sync_ms = 0;
     bool     synchronized = false;
+    uint32_t last_arrival_us = 0;
+    int32_t  last_pll_err = 0;
 };
 
 class TdmEngine {
@@ -58,6 +62,7 @@ public:
     void onPacketReceived(RxCallback cb) { _rxCallback = cb; }
 
     const LinkStats& getStats() const { return _stats; }
+    TdmSlot getCurrentSlot() const { return _currentSlot; }
 
     static uint16_t calculateCrc16(const uint8_t* data, size_t length);
 
@@ -79,6 +84,7 @@ private:
     uint8_t _rxBytesCount;
     uint16_t _rxCrc;
     RxCallback _rxCallback;
+    uint32_t _lastRxByteMs = 0;
 
     LinkStats _stats;
 };
