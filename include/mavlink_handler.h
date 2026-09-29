@@ -25,6 +25,8 @@ private:
     volatile size_t _tail;
 };
 
+typedef void (*MavlinkOutputCallback)(const uint8_t* buf, size_t len);
+
 class MavlinkHandler {
 public:
     MavlinkHandler(Stream& localSerial);
@@ -34,6 +36,12 @@ public:
     // Read bytes from local port (FC or GCS) into the outbound queue.
     // On Air unit: parses FC MAVLink stream, queues for RF TX with drop logic.
     void readFromLocal();
+
+    // Ingest raw MAVLink bytes from external sources (e.g. Wi-Fi UDP socket)
+    void ingestBytes(const uint8_t* data, size_t len);
+
+    // Register a secondary output callback (e.g. for Wi-Fi UDP broadcast)
+    void setOutputCallback(MavlinkOutputCallback cb) { _outputCallback = cb; }
 
     // Pull a chunk of outbound telemetry to transmit over radio slot (transparent FIFO).
     size_t getOutboundPayload(uint8_t* dest, size_t maxLen);
@@ -109,7 +117,9 @@ private:
     uint32_t _lastRfPacketMs = 0;
 
     Stream& _localSerial;
+    MavlinkOutputCallback _outputCallback = nullptr;
     void _outputToLocal(const uint8_t* buf, size_t len);
+    void parseByte(uint8_t c);
 
     // Internal: write raw bytes to _localSerial (used by both Air and Ground)
     void _writeRaw(const uint8_t* buf, size_t len);

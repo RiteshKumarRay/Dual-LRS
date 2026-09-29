@@ -166,16 +166,28 @@ void MavlinkHandler::readFromLocal() {
     int localReadCount = 0;
 
     while (_localSerial.available() > 0 && localReadCount++ < MAX_LOCAL_BYTES_PER_CALL) {
-        _lastLocalByteMs = millis();
-        _rawBytesRead++;
         uint8_t c = (uint8_t)_localSerial.read();
+        parseByte(c);
+    }
+}
 
-        if (_rxState == RxState::IDLE) {
-            if (c == 0xFE || c == 0xFD) {
-                _rxBuffer[0] = c;
-                _rxIndex = 1;
-                _rxState = (c == 0xFE) ? RxState::V1_LEN : RxState::V2_LEN;
-            }
+void MavlinkHandler::ingestBytes(const uint8_t* data, size_t len) {
+    if (data == nullptr || len == 0) return;
+    for (size_t i = 0; i < len; ++i) {
+        parseByte(data[i]);
+    }
+}
+
+void MavlinkHandler::parseByte(uint8_t c) {
+    _lastLocalByteMs = millis();
+    _rawBytesRead++;
+
+    if (_rxState == RxState::IDLE) {
+        if (c == 0xFE || c == 0xFD) {
+            _rxBuffer[0] = c;
+            _rxIndex = 1;
+            _rxState = (c == 0xFE) ? RxState::V1_LEN : RxState::V2_LEN;
+        }
         } else if (_rxState == RxState::V1_LEN) {
             _rxBuffer[1] = c;
             _rxExpectedLen = c + 8;     // 6 header + payload + 2 CRC
@@ -200,7 +212,7 @@ void MavlinkHandler::readFromLocal() {
                 if (!valid) {
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
                 }
 
                 _validPackets++;
@@ -209,7 +221,7 @@ void MavlinkHandler::readFromLocal() {
                     // NEVER forward RADIO_STATUS over RF! Both Air and Ground generate it locally.
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
 #if defined(DUAL_LRS_ROLE_AIR)
                 } else if (msgid == 0) {
                     _validHeartbeats++;
@@ -220,7 +232,7 @@ void MavlinkHandler::readFromLocal() {
                         _hbPending = true;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
-                        continue;
+                        return;
                     }
                 } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 77 || msgid == 148) {
                     // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK jump to front)
@@ -231,7 +243,7 @@ void MavlinkHandler::readFromLocal() {
                         _urgentSending = false;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
-                        continue;
+                        return;
                     }
                 } else if (msgid == 22) {
                     _validParamValues++;
@@ -294,12 +306,12 @@ void MavlinkHandler::readFromLocal() {
                     }
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
                 } else if (msgid == 111) {
                     // Ground: Drop TIMESYNC from QGC outright (saves ~280 B/s of congestion)
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
                 } else if (msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 23 || msgid == 76) {
                     // Ground: High-priority urgent uplink bypass (mission upload items, parameter writes, commands jump to front)
                     if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
@@ -309,7 +321,7 @@ void MavlinkHandler::readFromLocal() {
                         _urgentSending = false;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
-                        continue;
+                        return;
                     }
                 }
 
@@ -357,7 +369,7 @@ void MavlinkHandler::readFromLocal() {
                 if (!valid) {
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
                 }
 
                 _validPackets++;
@@ -366,7 +378,7 @@ void MavlinkHandler::readFromLocal() {
                     // NEVER forward RADIO_STATUS over RF! Both Air and Ground generate it locally.
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
 #if defined(DUAL_LRS_ROLE_AIR)
                 } else if (msgid == 0) {
                     _validHeartbeats++;
@@ -377,7 +389,7 @@ void MavlinkHandler::readFromLocal() {
                         _hbPending = true;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
-                        continue;
+                        return;
                     }
                 } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 77 || msgid == 148) {
                     // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK jump to front)
@@ -388,7 +400,7 @@ void MavlinkHandler::readFromLocal() {
                         _urgentSending = false;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
-                        continue;
+                        return;
                     }
                 } else if (msgid == 22) {
                     _validParamValues++;
@@ -451,12 +463,12 @@ void MavlinkHandler::readFromLocal() {
                     }
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
                 } else if (msgid == 111) {
                     // Ground: Drop TIMESYNC from QGC outright (saves ~280 B/s of congestion)
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
-                    continue;
+                    return;
                 } else if (msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 23 || msgid == 76) {
                     // Ground: High-priority urgent uplink bypass (mission upload items, parameter writes, commands jump to front)
                     if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
@@ -466,7 +478,7 @@ void MavlinkHandler::readFromLocal() {
                         _urgentSending = false;
                         _rxState = RxState::IDLE;
                         _rxIndex = 0;
-                        continue;
+                        return;
                     }
                 }
 
@@ -484,7 +496,6 @@ void MavlinkHandler::readFromLocal() {
             _rxState = RxState::IDLE;
             _rxIndex = 0;
         }
-    }
 }
 
 // ============================================================================
@@ -633,6 +644,9 @@ void MavlinkHandler::_writeRaw(const uint8_t* buf, size_t len) {
 void MavlinkHandler::_outputToLocal(const uint8_t* buf, size_t len) {
     if (buf == nullptr || len == 0) return;
     _localSerial.write(buf, len);
+    if (_outputCallback != nullptr) {
+        _outputCallback(buf, len);
+    }
 }
 
 // ============================================================================
@@ -711,7 +725,7 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
                     _gndFrameComplete = true;
                     // Validate MAVLink v1 header before sending: sysid must be non-zero
                     if (_gndFrameBufLen == _gndExpectedLen && _gndFrameBufLen >= 8 && _gndFrameBuf[3] > 0) {
-                        _localSerial.write(_gndFrameBuf, _gndFrameBufLen);
+                        _outputToLocal(_gndFrameBuf, _gndFrameBufLen);
                     }
                     _gndFrameBufLen = 0;
                 }
@@ -743,7 +757,7 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
                     // Validate MAVLink v2 header before sending: sysid > 0, incompat_flags <= 1
                     if (_gndFrameBufLen == _gndExpectedLen && _gndFrameBufLen >= 12 &&
                         _gndFrameBuf[5] > 0 && _gndFrameBuf[2] <= 1) {
-                        _localSerial.write(_gndFrameBuf, _gndFrameBufLen);
+                        _outputToLocal(_gndFrameBuf, _gndFrameBufLen);
                     }
                     _gndFrameBufLen = 0;
                 }
@@ -753,7 +767,7 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
 
     // If we completed a MAVLink frame AND there's a pending RADIO_STATUS, inject now
     if (_gndFrameComplete && _pendingStatusReady) {
-        _localSerial.write(_pendingStatusPkt, sizeof(_pendingStatusPkt));
+        _outputToLocal(_pendingStatusPkt, sizeof(_pendingStatusPkt));
         _pendingStatusReady = false;
     }
 #endif
@@ -810,7 +824,7 @@ void MavlinkHandler::injectRadioStatus(uint8_t rssi, uint8_t remRssi, uint8_t tx
     // Safety: if no RF data has been received for > 1 second (link offline),
     // force-inject directly so GCS still sees link status.
     if (millis() - _lastRfPacketMs > 1000) {
-        _localSerial.write(_pendingStatusPkt, sizeof(_pendingStatusPkt));
+        _outputToLocal(_pendingStatusPkt, sizeof(_pendingStatusPkt));
         _pendingStatusReady = false;
         _gndFrameComplete = true;
     }

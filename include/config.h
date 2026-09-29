@@ -32,6 +32,15 @@
 #define LED_PIN_ON         HIGH
 #define LED_PIN_OFF        LOW
 
+// --- Wi-Fi Telemetry Settings (ESP32 Ground Unit only) ---
+#define ENABLE_WIFI_TELEMETRY    1
+#define WIFI_STA_SSID            "Ritesh S22+"
+#define WIFI_STA_PASS            "1234554321"
+#define WIFI_AP_SSID             "Dual-LRS-Ground"
+#define WIFI_AP_PASS             "duallrs123"
+#define WIFI_UDP_PORT            14550
+#define WIFI_CONNECT_TIMEOUT_MS  4000   // 4s timeout before auto-fallback to AP mode
+
 #else
 // --- Pin Definitions (STM32F411CE BlackPill) ---
 #define PIN_LED_BUILTIN    PC13 // Onboard Blue LED (Active LOW on BlackPill)
