@@ -2,6 +2,7 @@
 
 #include "wifi_telemetry.h"
 #include "esp_wifi.h"
+#include "nvs_flash.h"
 
 WifiTelemetry::WifiTelemetry()
     : _isApMode(false),
@@ -14,17 +15,14 @@ void WifiTelemetry::begin() {
     Serial.println("\n[WIFI] Initializing Dual-LRS Wireless Telemetry...");
     Serial.flush();
 
-    // Try connecting to phone hotspot first (STA mode)
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
-
-    Serial.printf("[WIFI] Searching for Hotspot: \"%s\" (timeout: %d ms)...\n", 
-                  WIFI_STA_SSID, WIFI_CONNECT_TIMEOUT_MS);
+    // Standard Arduino ESP32 connection flow:
+    Serial.printf("[WIFI] Connecting to Hotspot: \"%s\"...\n", WIFI_STA_SSID);
     Serial.flush();
+    WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
 
     uint32_t startMs = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - startMs < WIFI_CONNECT_TIMEOUT_MS)) {
-        delay(100);
+        delay(200);
         Serial.print(".");
         Serial.flush();
     }
@@ -33,26 +31,21 @@ void WifiTelemetry::begin() {
 
     if (WiFi.status() == WL_CONNECTED) {
         _isApMode = false;
-        WiFi.setSleep(false);
         Serial.printf("[WIFI] CONNECTED to Hotspot! IP: %s\n", WiFi.localIP().toString().c_str());
         Serial.printf("[WIFI] Subnet Mask: %s | Gateway: %s\n", 
                       WiFi.subnetMask().toString().c_str(), WiFi.gatewayIP().toString().c_str());
-        // Calculate subnet broadcast IP (e.g. 192.168.43.255)
         _broadcastIP = IPAddress(WiFi.localIP() | ~WiFi.subnetMask());
-        Serial.printf("[WIFI] Telemetry Broadcast IP: %s:%u\n", 
+        Serial.printf("[WIFI] Telemetry Broadcast: %s:%u\n", 
                       _broadcastIP.toString().c_str(), WIFI_UDP_PORT);
     } else {
-        // Hotspot unreachable: fallback to standalone Access Point
-        Serial.println("[WIFI] Hotspot not found. Switching to AP Mode...");
+        Serial.println("[WIFI] Hotspot not found. Starting Standalone AP...");
         Serial.flush();
         WiFi.disconnect(true);
         delay(100);
-        WiFi.mode(WIFI_AP);
         WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
-        WiFi.setSleep(false);
         _isApMode = true;
         _broadcastIP = IPAddress(192, 168, 4, 255);
-        Serial.printf("[WIFI] Standalone AP Started: SSID=\"%s\" | IP=%s\n",
+        Serial.printf("[WIFI] Standalone AP Ready! SSID: \"%s\" | IP: %s\n",
                       WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
     }
 

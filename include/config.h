@@ -32,8 +32,8 @@
 #define LED_PIN_ON         HIGH
 #define LED_PIN_OFF        LOW
 
-// --- Wi-Fi Telemetry Settings (ESP32 Ground Unit only) ---
-#define ENABLE_WIFI_TELEMETRY    1
+// --- Wi-Fi Telemetry Settings (ESP32 Ground Unit only - Preserved for Future) ---
+#define ENABLE_WIFI_TELEMETRY    0
 #define WIFI_STA_SSID            "Ritesh S22+"
 #define WIFI_STA_PASS            "1234554321"
 #define WIFI_AP_SSID             "Dual-LRS-Ground"

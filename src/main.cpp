@@ -33,10 +33,11 @@
     #endif
 #endif
 
-#if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY)
-#include "wifi_telemetry.h"
-static WifiTelemetry wifiTelem;
-#endif
+// [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
+// #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
+// #include "wifi_telemetry.h"
+// static WifiTelemetry wifiTelem;
+// #endif
 
 // Drivers and Handlers
 E22Driver radio(SerialRadio, PIN_RADIO_M0, PIN_RADIO_M1, PIN_RADIO_AUX);
@@ -124,7 +125,7 @@ void setup() {
 
     #if defined(ESP32)
         Serial.begin(GCS_USB_BAUD);
-        delay(300); // Let USB CDC settle so first Wi-Fi log lines are not lost
+        delay(300); // Let USB CDC settle so first log lines are not lost
     #elif defined(USBCON)
         Serial.begin(GCS_USB_BAUD);
     #endif
@@ -137,16 +138,17 @@ void setup() {
         #endif
     #endif
 
+    // [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
+    // #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
+    // wifiTelem.begin();
+    // telemHandler.setOutputCallback([](const uint8_t* buf, size_t len) {
+    //     wifiTelem.sendMavlinkPacket(buf, len);
+    // });
+    // #endif
+
     tdm.onPacketReceived(onRadioPacketReceived);
     tdm.begin();
     telemHandler.begin();
-
-#if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY)
-    wifiTelem.begin();
-    telemHandler.setOutputCallback([](const uint8_t* buf, size_t len) {
-        wifiTelem.sendMavlinkPacket(buf, len);
-    });
-#endif
 }
 
 void loop() {
@@ -155,9 +157,10 @@ void loop() {
     // 1. Read bytes from local MAVLink stream (FC or Mission Planner)
     telemHandler.readFromLocal();
 
-#if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY)
-    wifiTelem.update(telemHandler);
-#endif
+    // [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
+    // #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
+    // wifiTelem.update(telemHandler);
+    // #endif
 
     #if defined(DUAL_LRS_ROLE_AIR) && defined(USBCON)
     // USB command handler: ESC (0x1B) resets the BlackPill into DFU bootloader mode.
