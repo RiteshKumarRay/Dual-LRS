@@ -308,6 +308,34 @@ with a queued GCS uplink. MAVLink uplink can use a Ground slot only when fresh
 handset data is unavailable. A future runtime policy must be overridden to RC
 priority whenever the FC is armed or the link is degraded.
 
+### Prior-Art Scheduling Context
+
+Reserving control-link service before telemetry is not unique to Dual-LRS. It
+is a standard safety principle used by integrated RC/telemetry systems such as
+mLRS and ExpressLRS: control packets receive protected airtime, while telemetry
+uses the remaining budget or is reduced when the link is busy or degraded.
+Typical SiK installations avoid this scheduling conflict by using a separate
+RC receiver and a separate telemetry radio.
+
+Dual-LRS must implement the principle explicitly because one UART-controlled,
+half-duplex E22 modem carries both RC and MAVLink. Unlike mLRS or ExpressLRS,
+Dual-LRS does not directly control the underlying RF chip; modem airtime,
+sub-packet size, AUX turnaround, and buffering are controlled partly by E22
+firmware. The following are therefore scheduler policies, not E22 operating
+modes:
+
+| Policy | Intended behavior |
+| :--- | :--- |
+| `RC_PRIORITY` | Reserve every available fresh RC opportunity; reduce or stop MAVLink |
+| `BALANCED` | Preserve the RC reservation, then use remaining measured capacity for MAVLink |
+| `TELEMETRY_TRANSFER` | Preserve a defined RC minimum while using reliable fragments for missions/parameters |
+| `MAVLINK_ONLY_ALLOWED_FOR_BENCH` | Permit no handset control only for bench/configuration use; never fabricate RC frames |
+
+The flight controller armed state or degraded-link state must override a
+telemetry request and force `RC_PRIORITY`. These policies are not yet exposed
+as a runtime user switch; the current production-safe behavior reserves a
+fresh RC frame whenever one is available.
+
 ---
 
 ## 8. Repository Layout
