@@ -301,6 +301,13 @@ time only with demonstrated margin. RC freshness, maximum control-data age,
 failsafe behavior, and RC latency under saturated MAVLink traffic are more
 important than the nominal update frequency.
 
+At present there is no runtime Normal/RC-priority/Telemetry switch. In the
+development MAVLink build, the Ground scheduler reserves the current cycle for
+a fresh RC frame whenever one is available; it does not replace that frame
+with a queued GCS uplink. MAVLink uplink can use a Ground slot only when fresh
+handset data is unavailable. A future runtime policy must be overridden to RC
+priority whenever the FC is armed or the link is degraded.
+
 ---
 
 ## 8. Repository Layout

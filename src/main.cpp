@@ -437,22 +437,18 @@ void loop() {
                 TransportPackedRc packed_rc;
                 bool has_rc = rcGroundAdapter.get_packed_rc(&packed_rc, now);
 
-                // Priority 1: Handset RC control (unconditional)
-                // When handset is active, send RC_CONTROL
-                // If GCS uplink MAVLink is pending (and Stage 3.1 RC-only mode is OFF),
-                // allow 1 uplink slot every 4 slots (or when handset is inactive)
+                // Fresh RC has priority over Ground-to-Air MAVLink. A valid RC
+                // frame must not be displaced by a queued GCS packet.
                 bool send_rc = has_rc;
-                static uint8_t slotsSinceRc = 0;
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
                 bool has_uplink_mavlink = groundUplinkFragmenter.has_next_fragment() || telemHandler.hasOutboundData();
-                if (has_rc && has_uplink_mavlink && slotsSinceRc >= 3) {
+#if (DUAL_LRS_RESERVE_RC_EVERY_CYCLE == 0)
+                // Development-only opt-out for measured scheduler experiments.
+                // This must not be used for flight firmware.
+                if (has_rc && has_uplink_mavlink) {
                     send_rc = false;
-                    slotsSinceRc = 0;
-                } else if (has_rc) {
-                    send_rc = true;
-                    slotsSinceRc++;
                 }
-
+#endif
                 if (!send_rc && has_uplink_mavlink) {
                     if (!groundUplinkFragmenter.has_next_fragment()) {
                         size_t pkt_len = telemHandler.getOutboundPacket(groundTxMsgBuf, sizeof(groundTxMsgBuf));

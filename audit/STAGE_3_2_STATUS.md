@@ -21,6 +21,10 @@ does not claim that missions, parameters, or commands are production-reliable.
 - Oversized single-burst payloads are rejected rather than silently truncated.
 - RC transmission is not disabled merely because Stage 3.2 MAVLink mode is
   enabled.
+- The production Ground scheduler reserves a fresh RC frame whenever one is
+  available. Ground-to-Air MAVLink no longer intentionally replaces a valid RC
+  frame. A compile-time opt-out exists only for controlled scheduler experiments
+  and must not be used for flight firmware.
 - The production firmware and diagnostic build matrix compiles:
   `dual_lrs_air`, `dual_lrs_ground`, `dual_lrs_ground_esp32`, `diag_air`,
   `diag_ground_esp32`, `test_air_crsf_uart`, and

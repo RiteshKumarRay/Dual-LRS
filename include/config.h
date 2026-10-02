@@ -118,6 +118,12 @@
 #define TDM_AIR_SLOT_MS        45  // Slot 2: Air -> Ground telemetry slot (37ms - 82ms)
 #define TDM_GUARD_GAP2_MS       8  // Turnaround guard delay 2 (82ms - 90ms)
 
+// Safety policy: never replace a fresh RC frame with Ground-to-Air MAVLink.
+// MAVLink uplink may use a Ground slot only when no fresh handset frame exists.
+#ifndef DUAL_LRS_RESERVE_RC_EVERY_CYCLE
+#define DUAL_LRS_RESERVE_RC_EVERY_CYCLE 1
+#endif
+
 // Buffer Sizes & Single-Burst Framing Bounds (E22 64-byte Subpacket Boundary)
 #define RADIO_BUFFER_SIZE         1024
 #if defined(DUAL_LRS_ROLE_AIR)
