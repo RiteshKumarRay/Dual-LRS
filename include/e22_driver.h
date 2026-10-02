@@ -9,13 +9,23 @@ enum class E22Mode : uint8_t {
     SLEEP        = 3  // M0=1, M1=1 : Deep sleep
 };
 
+enum class E22RegReadStatus : uint8_t {
+    OK = 0,
+    READ_FAILED,
+    REGISTERS_UNVERIFIED,
+    MODE_RESTORE_FAILED,
+    UART_RESTORE_FAILED
+};
+
 class E22Driver {
 public:
     E22Driver(HardwareSerial& serialPort, uint8_t pinM0, uint8_t pinM1, uint8_t pinAux);
 
     void begin(uint32_t baudRate = RADIO_UART_BAUD);
+    bool beginPassive(uint32_t baudRate = RADIO_UART_BAUD);
     void setMode(E22Mode mode);
     bool configureRadio(uint8_t powerLevel = E22_ACTIVE_TX_POWER, uint8_t channel = 0x17);
+    E22RegReadStatus readRegistersReadOnly(uint8_t* dest, size_t maxLen, size_t& readLen);
     bool isBusy() const;
     bool waitForReady(uint32_t timeoutMs = 100);
 

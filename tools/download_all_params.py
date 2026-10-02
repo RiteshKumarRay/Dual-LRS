@@ -13,7 +13,7 @@ m = mavutil.mavlink_connection('/dev/ttyUSB0', baud=115200, source_system=255, s
 
 print("Draining stale serial backlog...")
 t_drain = time.time()
-while time.time() - t_drain < 1.2:
+while time.time() - t_drain < 2.0:
     m.recv_msg()
 
 print("Waiting for live FC Heartbeat...")

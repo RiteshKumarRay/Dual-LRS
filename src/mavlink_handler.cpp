@@ -69,12 +69,73 @@ void RingBuffer::clear() {
 
 #include <string.h>
 
+// MAVLink message CRC_EXTRA lookup table (for msgid 0..255)
+static const uint8_t MAVLINK_MESSAGE_CRCS[256] = {
+    50, 124, 137, 0, 237, 217, 104, 119, 0, 0, 0, 89, 0, 0, 0, 0,
+    0, 0, 0, 0, 214, 159, 220, 168, 24, 23, 170, 144, 67, 115, 39, 246,
+    185, 104, 237, 244, 222, 212, 9, 254, 230, 28, 28, 132, 221, 232, 11, 153,
+    41, 39, 78, 196, 0, 0, 15, 3, 0, 0, 0, 0, 0, 167, 183, 119,
+    191, 118, 148, 21, 0, 243, 124, 0, 0, 38, 20, 158, 152, 143, 0, 0,
+    0, 106, 49, 22, 143, 140, 5, 150, 0, 231, 183, 63, 54, 47, 0, 0,
+    0, 0, 0, 0, 175, 102, 158, 208, 56, 93, 138, 108, 32, 185, 84, 34,
+    174, 124, 237, 4, 76, 128, 56, 116, 134, 237, 203, 250, 87, 203, 220, 25,
+    226, 46, 29, 223, 85, 6, 229, 203, 1, 195, 109, 168, 181, 47, 72, 131,
+    127, 0, 103, 154, 178, 200, 134, 219, 208, 188, 84, 22, 19, 21, 134, 0,
+    78, 68, 189, 127, 154, 21, 21, 144, 1, 234, 73, 181, 22, 83, 167, 138,
+    234, 240, 47, 189, 52, 174, 229, 85, 159, 186, 72, 0, 0, 0, 0, 92,
+    36, 71, 98, 120, 0, 0, 0, 0, 134, 205, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 69, 101, 50, 202, 17, 162, 0, 0, 0, 0,
+    0, 208, 207, 0, 0, 0, 163, 105, 151, 35, 150, 179, 0, 0, 0, 0,
+    0, 90, 104, 85, 95, 130, 184, 81, 8, 204, 49, 170, 44, 83, 46, 0,
+};
+
 // MAVLink X.25 CRC accumulator (standard MAVLink CRC algorithm)
 static inline void mavlink_crc_accumulate(uint8_t data, uint16_t* crcAccum) {
     uint8_t tmp;
     tmp = data ^ (uint8_t)(*crcAccum & 0xff);
     tmp ^= (tmp << 4);
     *crcAccum = (*crcAccum >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4);
+}
+
+// Helper: identifies mission-family packets that route to the dedicated _missionCache
+static inline bool isMissionMavlinkMessage(uint32_t msgid) {
+    return (msgid == 39 || msgid == 40 || msgid == 41 || msgid == 43 ||
+            msgid == 44 || msgid == 45 || msgid == 47 || msgid == 51 || msgid == 73);
+}
+
+// Validates the 16-bit MAVLink X.25 CRC of a complete frame
+static inline bool validateMavlinkCrc(const uint8_t* pkt, uint16_t len) {
+    if (pkt == nullptr || len < 8) return false;
+    if (pkt[0] == 0xFE) { // MAVLink v1
+        uint8_t payloadLen = pkt[1];
+        if (len < (uint16_t)(payloadLen + 8)) return false;
+        uint8_t msgid = pkt[5];
+        uint16_t crc = 0xFFFF;
+        for (size_t i = 1; i < (size_t)(6 + payloadLen); ++i) {
+            mavlink_crc_accumulate(pkt[i], &crc);
+        }
+        mavlink_crc_accumulate(MAVLINK_MESSAGE_CRCS[msgid], &crc);
+        uint16_t expectedCrc = (uint16_t)pkt[6 + payloadLen] | ((uint16_t)pkt[7 + payloadLen] << 8);
+        return (crc == expectedCrc);
+    } else if (pkt[0] == 0xFD) { // MAVLink v2
+        uint8_t payloadLen = pkt[1];
+        uint8_t incompatFlags = pkt[2];
+        size_t sigLen = (incompatFlags & 0x01) ? 13 : 0;
+        if (len < (uint16_t)(payloadLen + 12 + sigLen)) return false;
+        uint32_t msgid = pkt[7] | ((uint32_t)pkt[8] << 8) | ((uint32_t)pkt[9] << 16);
+        uint16_t crc = 0xFFFF;
+        for (size_t i = 1; i < (size_t)(10 + payloadLen); ++i) {
+            mavlink_crc_accumulate(pkt[i], &crc);
+        }
+        if (msgid >= 256) {
+            return true; // Pass through rare high-ID messages without false CRC failure
+        }
+        uint8_t crcExtra = MAVLINK_MESSAGE_CRCS[msgid];
+        mavlink_crc_accumulate(crcExtra, &crc);
+        uint16_t expectedCrc = (uint16_t)pkt[10 + payloadLen] | ((uint16_t)pkt[11 + payloadLen] << 8);
+        return (crc == expectedCrc);
+    }
+    return false;
 }
 
 // Helper: identifies critical MAVLink packets that must NEVER be dropped during telemetry congestion.
@@ -118,10 +179,19 @@ void MavlinkHandler::begin() {
     _pendingStatusReady = false;
     _hbPending = false;
     _hbLen = 0;
+    _missionPending = false;
+    _missionSending = false;
+    _missionLen = 0;
+    _lastMissionIngestMs = 0;
     _urgentPending = false;
     _urgentSending = false;
     _urgentLen = 0;
     _gndFrameBufLen = 0;
+    _airUplinkState = AirUplinkState::IDLE;
+    _airUplinkExpectedLen = 0;
+    _airUplinkCount = 0;
+    _airUplinkInProgress = false;
+    _lastUplinkChunkMs = 0;
 }
 
 bool MavlinkHandler::pushByte(uint8_t b) {
@@ -188,64 +258,78 @@ void MavlinkHandler::parseByte(uint8_t c) {
             _rxIndex = 1;
             _rxState = (c == 0xFE) ? RxState::V1_LEN : RxState::V2_LEN;
         }
-        } else if (_rxState == RxState::V1_LEN) {
-            _rxBuffer[1] = c;
-            _rxExpectedLen = c + 8;     // 6 header + payload + 2 CRC
-            _rxIndex = 2;
-            _rxState = RxState::V1_PAYLOAD;
-        } else if (_rxState == RxState::V1_PAYLOAD) {
-            _rxBuffer[_rxIndex++] = c;
-            if (_rxIndex >= _rxExpectedLen) {
-                uint8_t payloadLen = _rxBuffer[1];
-                uint8_t sysid = _rxBuffer[3];
-                uint8_t msgid = _rxBuffer[5];
+    } else if (_rxState == RxState::V1_LEN) {
+        _rxBuffer[1] = c;
+        _rxExpectedLen = c + 8;     // 6 header + payload + 2 CRC
+        _rxIndex = 2;
+        _rxState = RxState::V1_PAYLOAD;
+    } else if (_rxState == RxState::V1_PAYLOAD) {
+        _rxBuffer[_rxIndex++] = c;
+        if (_rxIndex >= _rxExpectedLen) {
+            uint8_t payloadLen = _rxBuffer[1];
+            uint8_t sysid = _rxBuffer[3];
+            uint8_t msgid = _rxBuffer[5];
 
-                // Sanity validation: reject corrupted bytes masquerading as MAVLink
-                bool valid = (sysid > 0);
-                if (msgid == 22 && (payloadLen == 0 || payloadLen > 25)) valid = false; // PARAM_VALUE
-                else if (msgid == 0 && (payloadLen == 0 || payloadLen > 9)) valid = false; // HEARTBEAT
-                else if (msgid == 20 && (payloadLen == 0 || payloadLen > 20)) valid = false; // PARAM_REQUEST_READ
-                else if (msgid == 21 && (payloadLen == 0 || payloadLen > 2)) valid = false; // PARAM_REQUEST_LIST
-                else if (msgid == 23 && (payloadLen == 0 || payloadLen > 23)) valid = false; // PARAM_SET
-                else if (msgid == 109 && (payloadLen == 0 || payloadLen > 9)) valid = false; // RADIO_STATUS
+            // Sanity validation: reject corrupted bytes masquerading as MAVLink
+            bool valid = (sysid > 0);
+            if (msgid == 22 && (payloadLen == 0 || payloadLen > 25)) valid = false; // PARAM_VALUE
+            else if (msgid == 0 && (payloadLen == 0 || payloadLen > 9)) valid = false; // HEARTBEAT
+            else if (msgid == 20 && (payloadLen == 0 || payloadLen > 20)) valid = false; // PARAM_REQUEST_READ
+            else if (msgid == 21 && (payloadLen == 0 || payloadLen > 2)) valid = false; // PARAM_REQUEST_LIST
+            else if (msgid == 23 && (payloadLen == 0 || payloadLen > 23)) valid = false; // PARAM_SET
+            else if (msgid == 109 && (payloadLen == 0 || payloadLen > 9)) valid = false; // RADIO_STATUS
 
-                if (!valid) {
+            if (!valid) {
+                _rxState = RxState::IDLE;
+                _rxIndex = 0;
+                return;
+            }
+
+            _validPackets++;
+            _lastValidPacketMs = millis();
+            if (msgid == 109) {
+                // NEVER forward RADIO_STATUS over RF! Both Air and Ground generate it locally.
+                _rxState = RxState::IDLE;
+                _rxIndex = 0;
+                return;
+#if defined(DUAL_LRS_ROLE_AIR)
+            } else if (msgid == 0) {
+                _validHeartbeats++;
+                _lastHeartbeatMs = millis();
+                if (_rxExpectedLen <= sizeof(_hbCache)) {
+                    memcpy(_hbCache, _rxBuffer, _rxExpectedLen);
+                    _hbLen = (uint8_t)_rxExpectedLen;
+                    _hbPending = true;
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
                     return;
                 }
-
-                _validPackets++;
-                _lastValidPacketMs = millis();
-                if (msgid == 109) {
-                    // NEVER forward RADIO_STATUS over RF! Both Air and Ground generate it locally.
+            } else if (isMissionMavlinkMessage(msgid)) {
+                // Air: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                if (_rxExpectedLen <= sizeof(_missionCache)) {
+                    if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
+                        memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                        _missionLen = (uint8_t)_rxExpectedLen;
+                        _missionPending = true;
+                        _missionSending = false;
+                        _lastMissionIngestMs = millis();
+                        _rxState = RxState::IDLE;
+                        _rxIndex = 0;
+                        return;
+                    }
+                }
+            } else if (msgid == 253 || msgid == 77) {
+                // Air: High-priority urgent response bypass (STATUSTEXT, COMMAND_ACK jump to front)
+                if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
+                    memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
+                    _urgentLen = (uint8_t)_rxExpectedLen;
+                    _urgentPending = true;
+                    _urgentSending = false;
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
                     return;
-#if defined(DUAL_LRS_ROLE_AIR)
-                } else if (msgid == 0) {
-                    _validHeartbeats++;
-                    _lastHeartbeatMs = millis();
-                    if (_rxExpectedLen <= sizeof(_hbCache)) {
-                        memcpy(_hbCache, _rxBuffer, _rxExpectedLen);
-                        _hbLen = (uint8_t)_rxExpectedLen;
-                        _hbPending = true;
-                        _rxState = RxState::IDLE;
-                        _rxIndex = 0;
-                        return;
-                    }
-                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 77 || msgid == 148) {
-                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK jump to front)
-                    if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
-                        memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
-                        _urgentLen = (uint8_t)_rxExpectedLen;
-                        _urgentPending = true;
-                        _urgentSending = false;
-                        _rxState = RxState::IDLE;
-                        _rxIndex = 0;
-                        return;
-                    }
-                } else if (msgid == 22) {
+                }
+            } else if (msgid == 22) {
                     _validParamValues++;
                     _lastParamRxMs = millis();
                 }
@@ -265,17 +349,19 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (isCriticalMavlinkMessage(msgid)) {
                     drop = false; // Critical (params, heartbeat, mission, commands): always pass
                 } else if (isEssentialTelem) {
-                    // Allow essential HUD telemetry at 1Hz each, even during param flood
+                    // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
                     uint32_t* lastMs = nullptr;
-                    if      (msgid == 1)   lastMs = &_lastSysStatusMs;
-                    else if (msgid == 24)  lastMs = &_lastGpsMs;
-                    else if (msgid == 33)  lastMs = &_lastGlobalPosMs;
-                    else if (msgid == 30)  lastMs = &_lastAttitudeMs;
-                    else if (msgid == 74)  lastMs = &_lastVfrHudMs;
-                    else if (msgid == 147) lastMs = &_lastBatteryStatusMs;
-                    if (lastMs && (millis() - *lastMs >= 1000)) {
+                    uint32_t minIntervalMs = 1000;
+                    if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
+                    else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
+                    else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
+                    else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
+                    else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
+                    else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
+
+                    if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
                         *lastMs = millis();
-                        drop = false; // Let one through per second
+                        drop = false;
                     } else {
                         drop = true; // Rate-limited: not yet
                     }
@@ -312,8 +398,22 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
                     return;
-                } else if (msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 23 || msgid == 76) {
-                    // Ground: High-priority urgent uplink bypass (mission upload items, parameter writes, commands jump to front)
+                } else if (isMissionMavlinkMessage(msgid)) {
+                    // Ground: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                    if (_rxExpectedLen <= sizeof(_missionCache)) {
+                        if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
+                            memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                            _missionLen = (uint8_t)_rxExpectedLen;
+                            _missionPending = true;
+                            _missionSending = false;
+                            _lastMissionIngestMs = millis();
+                            _rxState = RxState::IDLE;
+                            _rxIndex = 0;
+                            return;
+                        }
+                    }
+                } else if (msgid == 23 || msgid == 76) {
+                    // Ground: High-priority urgent uplink bypass (PARAM_SET, COMMAND_LONG jump to front)
                     if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
                         memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
                         _urgentLen = (uint8_t)_rxExpectedLen;
@@ -391,8 +491,22 @@ void MavlinkHandler::parseByte(uint8_t c) {
                         _rxIndex = 0;
                         return;
                     }
-                } else if (msgid == 253 || msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 77 || msgid == 148) {
-                    // Air: High-priority urgent response bypass (STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK jump to front)
+                } else if (isMissionMavlinkMessage(msgid)) {
+                    // Air: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                    if (_rxExpectedLen <= sizeof(_missionCache)) {
+                        if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
+                            memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                            _missionLen = (uint8_t)_rxExpectedLen;
+                            _missionPending = true;
+                            _missionSending = false;
+                            _lastMissionIngestMs = millis();
+                            _rxState = RxState::IDLE;
+                            _rxIndex = 0;
+                            return;
+                        }
+                    }
+                } else if (msgid == 253 || msgid == 77) {
+                    // Air: High-priority urgent response bypass (STATUSTEXT, COMMAND_ACK jump to front)
                     if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
                         memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
                         _urgentLen = (uint8_t)_rxExpectedLen;
@@ -422,17 +536,19 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (isCriticalMavlinkMessage(msgid)) {
                     drop = false; // Critical (params, heartbeat, mission, commands): always pass
                 } else if (isEssentialTelem) {
-                    // Allow essential HUD telemetry at 1Hz each, even during param flood
+                    // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
                     uint32_t* lastMs = nullptr;
-                    if      (msgid == 1)   lastMs = &_lastSysStatusMs;
-                    else if (msgid == 24)  lastMs = &_lastGpsMs;
-                    else if (msgid == 33)  lastMs = &_lastGlobalPosMs;
-                    else if (msgid == 30)  lastMs = &_lastAttitudeMs;
-                    else if (msgid == 74)  lastMs = &_lastVfrHudMs;
-                    else if (msgid == 147) lastMs = &_lastBatteryStatusMs;
-                    if (lastMs && (millis() - *lastMs >= 1000)) {
+                    uint32_t minIntervalMs = 1000;
+                    if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
+                    else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
+                    else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
+                    else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
+                    else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
+                    else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
+
+                    if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
                         *lastMs = millis();
-                        drop = false; // Let one through per second
+                        drop = false;
                     } else {
                         drop = true; // Rate-limited: not yet
                     }
@@ -469,8 +585,22 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     _rxState = RxState::IDLE;
                     _rxIndex = 0;
                     return;
-                } else if (msgid == 44 || msgid == 39 || msgid == 73 || msgid == 40 || msgid == 51 || msgid == 43 || msgid == 47 || msgid == 23 || msgid == 76) {
-                    // Ground: High-priority urgent uplink bypass (mission upload items, parameter writes, commands jump to front)
+                } else if (isMissionMavlinkMessage(msgid)) {
+                    // Ground: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                    if (_rxExpectedLen <= sizeof(_missionCache)) {
+                        if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
+                            memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                            _missionLen = (uint8_t)_rxExpectedLen;
+                            _missionPending = true;
+                            _missionSending = false;
+                            _lastMissionIngestMs = millis();
+                            _rxState = RxState::IDLE;
+                            _rxIndex = 0;
+                            return;
+                        }
+                    }
+                } else if (msgid == 23 || msgid == 76) {
+                    // Ground: High-priority urgent uplink bypass (PARAM_SET, COMMAND_LONG jump to front)
                     if (!_urgentPending && _rxExpectedLen <= sizeof(_urgentCache)) {
                         memcpy(_urgentCache, _rxBuffer, _rxExpectedLen);
                         _urgentLen = (uint8_t)_rxExpectedLen;
@@ -506,20 +636,26 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
     if (dest == nullptr || maxLen == 0) return 0;
 
     size_t avail = _txQueue.available();
-    if (avail == 0 && !_hbPending && !_urgentPending && _fragmentRemaining == 0) {
+    if (avail == 0 && !_hbPending && !_missionPending && !_urgentPending && _fragmentRemaining == 0) {
         return 0;
     }
 
-    // If we are currently continuing a fragmented multi-slot packet (> maxLen) from _txQueue
-    if (_fragmentRemaining > 0) {
-        size_t toPop = (_fragmentRemaining < maxLen) ? _fragmentRemaining : maxLen;
-        if (toPop > avail) toPop = avail;
-        size_t popped = _txQueue.popBytes(dest, toPop);
-        _fragmentRemaining -= popped;
-        return popped;
+    // 1. If a mission multi-slot transmission is already in progress, finish it first!
+    if (_missionSending && _missionPending && _missionLen > 0) {
+        size_t toSend = (_missionLen < maxLen) ? _missionLen : maxLen;
+        memcpy(dest, _missionCache, toSend);
+        if (toSend < _missionLen) {
+            memmove(_missionCache, _missionCache + toSend, _missionLen - toSend);
+            _missionLen -= (uint8_t)toSend;
+        } else {
+            _missionPending = false;
+            _missionLen = 0;
+            _missionSending = false;
+        }
+        return toSend;
     }
 
-    // 1. If an urgent multi-slot transmission is already in progress, finish it first!
+    // 2. If an urgent multi-slot transmission is already in progress, finish it first!
     if (_urgentSending && _urgentPending && _urgentLen > 0) {
         size_t toSend = (_urgentLen < maxLen) ? _urgentLen : maxLen;
         memcpy(dest, _urgentCache, toSend);
@@ -534,7 +670,32 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
         return toSend;
     }
 
-    // 2. High-priority Heartbeat bypass: always send HEARTBEAT first if pending!
+    // 3. If we are currently continuing a fragmented multi-slot packet (> maxLen) from _txQueue
+    if (_fragmentRemaining > 0) {
+        size_t toPop = (_fragmentRemaining < maxLen) ? _fragmentRemaining : maxLen;
+        if (toPop > avail) toPop = avail;
+        size_t popped = _txQueue.popBytes(dest, toPop);
+        _fragmentRemaining -= popped;
+        return popped;
+    }
+
+    // 4. Start new Mission frame (highest priority: mission handshake steps take precedence)
+    if (_missionPending && _missionLen > 0) {
+        _missionSending = true;
+        size_t toSend = (_missionLen < maxLen) ? _missionLen : maxLen;
+        memcpy(dest, _missionCache, toSend);
+        if (toSend < _missionLen) {
+            memmove(_missionCache, _missionCache + toSend, _missionLen - toSend);
+            _missionLen -= (uint8_t)toSend;
+        } else {
+            _missionPending = false;
+            _missionLen = 0;
+            _missionSending = false;
+        }
+        return toSend;
+    }
+
+    // 5. High-priority Heartbeat bypass: always send HEARTBEAT first if pending!
     if (_hbPending && _hbLen > 0) {
         size_t toSend = (_hbLen < maxLen) ? _hbLen : maxLen;
         memcpy(dest, _hbCache, toSend);
@@ -548,9 +709,9 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
         return toSend;
     }
 
-    // 3. High-priority urgent bypass: start sending pending urgent packet
-    //    Air: STATUSTEXT, MISSION_COUNT/REQUEST/ITEM/ACK, COMMAND_ACK
-    //    Ground: MISSION_ITEM, MISSION_COUNT, PARAM_SET, COMMAND_LONG
+    // 6. High-priority urgent bypass: start sending pending urgent packet
+    //    Air: STATUSTEXT, COMMAND_ACK
+    //    Ground: PARAM_SET, COMMAND_LONG
     if (_urgentPending && _urgentLen > 0) {
         _urgentSending = true;
         size_t toSend = (_urgentLen < maxLen) ? _urgentLen : maxLen;
@@ -636,6 +797,99 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
     return packedBytes;
 }
 
+bool MavlinkHandler::hasOutboundData() const {
+    return _missionPending || _urgentPending || _hbPending || (_txQueue.available() > 0) || (_fragmentRemaining > 0);
+}
+
+size_t MavlinkHandler::getOutboundPacket(uint8_t* dest, size_t maxPacketLen) {
+    if (dest == nullptr || maxPacketLen == 0) return 0;
+
+    // 1. Mission cache (highest priority: mission handshake steps take precedence)
+    if (_missionPending && _missionLen > 0) {
+        if (_missionLen <= maxPacketLen) {
+            memcpy(dest, _missionCache, _missionLen);
+            size_t len = _missionLen;
+            _missionPending = false;
+            _missionLen = 0;
+            _missionSending = false;
+            return len;
+        }
+    }
+
+    // 2. High-priority urgent response cache (STATUSTEXT, COMMAND_ACK, PARAM_SET, COMMAND_LONG)
+    if (_urgentPending && _urgentLen > 0) {
+        if (_urgentLen <= maxPacketLen) {
+            memcpy(dest, _urgentCache, _urgentLen);
+            size_t len = _urgentLen;
+            _urgentPending = false;
+            _urgentLen = 0;
+            _urgentSending = false;
+            return len;
+        }
+    }
+
+    // 3. High-priority Heartbeat cache
+    if (_hbPending && _hbLen > 0) {
+        if (_hbLen <= maxPacketLen) {
+            memcpy(dest, _hbCache, _hbLen);
+            size_t len = _hbLen;
+            _hbPending = false;
+            _hbLen = 0;
+            return len;
+        }
+    }
+
+    // 4. Complete MAVLink packet from _txQueue
+    size_t avail = _txQueue.available();
+    while (avail > 0) {
+        int magic = _txQueue.peek(0);
+        if (magic < 0) break;
+
+        size_t frameLen = 0;
+        if (magic == 0xFE) { // MAVLink v1
+            if (avail < 2) break;
+            int payloadLen = _txQueue.peek(1);
+            if (payloadLen < 0) break;
+            frameLen = (size_t)payloadLen + 8; // 6 header + payload + 2 CRC
+        } else if (magic == 0xFD) { // MAVLink v2
+            if (avail < 3) break;
+            int payloadLen = _txQueue.peek(1);
+            int incompatFlags = _txQueue.peek(2);
+            if (payloadLen < 0 || incompatFlags < 0) break;
+            size_t sigLen = (incompatFlags & 0x01) ? 13 : 0;
+            frameLen = (size_t)payloadLen + 12 + sigLen; // 10 header + payload + 2 CRC + sig
+        } else {
+            // Discard stray non-magic byte to realign
+            _txQueue.pop();
+            avail = _txQueue.available();
+            continue;
+        }
+
+        // Sanity: if frameLen is impossible (> 280), discard 1 byte and realign
+        if (frameLen > 280) {
+            _txQueue.pop();
+            avail = _txQueue.available();
+            continue;
+        }
+
+        if (avail < frameLen) {
+            // Incomplete frame in queue; await remainder
+            break;
+        }
+
+        if (frameLen > maxPacketLen) {
+            // Oversized packet cannot fit in destination buffer: drop to prevent queue stall
+            _txQueue.pop();
+            avail = _txQueue.available();
+            continue;
+        }
+
+        return _txQueue.popBytes(dest, frameLen);
+    }
+
+    return 0;
+}
+
 void MavlinkHandler::_writeRaw(const uint8_t* buf, size_t len) {
     if (buf == nullptr || len == 0) return;
     _localSerial.write(buf, len);
@@ -659,7 +913,53 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
     if (src == nullptr || length == 0) return;
 
 #if defined(DUAL_LRS_ROLE_AIR)
-    // Air unit: Direct stream write of GCS uplink bytes to FC UART.
+    // Air unit: Track incoming GCS uplink frame boundaries to protect multi-slot commands from RADIO_STATUS splicing
+    if (millis() - _lastUplinkChunkMs > 150) {
+        _airUplinkState = AirUplinkState::IDLE;
+        _airUplinkInProgress = false;
+    }
+    _lastUplinkChunkMs = millis();
+
+    for (size_t i = 0; i < length; i++) {
+        uint8_t c = src[i];
+        switch (_airUplinkState) {
+            case AirUplinkState::IDLE:
+                if (c == 0xFE) {
+                    _airUplinkState = AirUplinkState::V1_LEN;
+                    _airUplinkInProgress = true;
+                    _airUplinkCount = 1;
+                } else if (c == 0xFD) {
+                    _airUplinkState = AirUplinkState::V2_LEN;
+                    _airUplinkInProgress = true;
+                    _airUplinkCount = 1;
+                }
+                break;
+            case AirUplinkState::V1_LEN:
+                _airUplinkExpectedLen = c + 8; // 6 header + payload + 2 CRC
+                _airUplinkCount = 2;
+                _airUplinkState = AirUplinkState::IN_FRAME;
+                break;
+            case AirUplinkState::V2_LEN:
+                _airUplinkExpectedLen = c + 12; // 10 header + payload + 2 CRC
+                _airUplinkCount = 2;
+                _airUplinkState = AirUplinkState::IN_FRAME;
+                break;
+            case AirUplinkState::IN_FRAME:
+                _airUplinkCount++;
+                if (_airUplinkCount == 3 && _airUplinkExpectedLen >= 12) {
+                    if (c & 0x01) { // MAVLink v2 signature flag
+                        _airUplinkExpectedLen += 13;
+                    }
+                }
+                if (_airUplinkCount >= _airUplinkExpectedLen) {
+                    _airUplinkState = AirUplinkState::IDLE;
+                    _airUplinkInProgress = false;
+                }
+                break;
+        }
+    }
+
+    // Direct stream write of GCS uplink bytes to FC UART.
     // ArduPilot's native MAVLink parser reassembles multi-slot packet fragments.
     // Zero buffering latency, no timeout drops for fragmented commands!
     _localSerial.write(src, length);
@@ -676,15 +976,6 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
         _gndFrameBufLen = 0;
     }
     _lastRfPacketMs = now;
-
-    // If incoming RF packet begins with a MAVLink magic byte (0xFE or 0xFD)
-    // while mid-frame, the tail of the previous frame was lost over RF.
-    // Discard the truncated previous frame immediately to prevent frame splicing / corruption.
-    if ((src[0] == 0xFE || src[0] == 0xFD) && _gndRxState != GndRxState::IDLE) {
-        _gndRxState = GndRxState::IDLE;
-        _gndFrameBufLen = 0;
-        _gndFrameComplete = true;
-    }
 
     // Track frame boundaries and buffer complete frames
     for (size_t i = 0; i < length; i++) {
@@ -723,9 +1014,11 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
                 if (_gndRxCount >= _gndExpectedLen) {
                     _gndRxState = GndRxState::IDLE;
                     _gndFrameComplete = true;
-                    // Validate MAVLink v1 header before sending: sysid must be non-zero
+                    // Validate MAVLink v1 header and CRC before sending: sysid must be non-zero
                     if (_gndFrameBufLen == _gndExpectedLen && _gndFrameBufLen >= 8 && _gndFrameBuf[3] > 0) {
-                        _outputToLocal(_gndFrameBuf, _gndFrameBufLen);
+                        if (validateMavlinkCrc(_gndFrameBuf, _gndFrameBufLen)) {
+                            _outputToLocal(_gndFrameBuf, _gndFrameBufLen);
+                        }
                     }
                     _gndFrameBufLen = 0;
                 }
@@ -754,10 +1047,12 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
                 if (_gndRxCount >= _gndExpectedLen) {
                     _gndRxState = GndRxState::IDLE;
                     _gndFrameComplete = true;
-                    // Validate MAVLink v2 header before sending: sysid > 0, incompat_flags <= 1
+                    // Validate MAVLink v2 header and CRC before sending: sysid > 0, incompat_flags <= 1
                     if (_gndFrameBufLen == _gndExpectedLen && _gndFrameBufLen >= 12 &&
                         _gndFrameBuf[5] > 0 && _gndFrameBuf[2] <= 1) {
-                        _outputToLocal(_gndFrameBuf, _gndFrameBufLen);
+                        if (validateMavlinkCrc(_gndFrameBuf, _gndFrameBufLen)) {
+                            _outputToLocal(_gndFrameBuf, _gndFrameBufLen);
+                        }
                     }
                     _gndFrameBufLen = 0;
                 }
@@ -814,8 +1109,12 @@ void MavlinkHandler::injectRadioStatus(uint8_t rssi, uint8_t remRssi, uint8_t tx
     packet[16] = (uint8_t)((crc >> 8) & 0xFF);
 
 #if defined(DUAL_LRS_ROLE_AIR)
-    // Air unit: send RADIO_STATUS directly to FC UART for immediate pacing
-    _localSerial.write(packet, sizeof(packet));
+    // Air unit: send RADIO_STATUS to FC UART only when NOT mid-way through receiving an uplink packet.
+    // Splicing 17 bytes of RADIO_STATUS into the middle of a multi-slot uplink frame
+    // (e.g. MISSION_REQUEST_LIST or MISSION_ITEM_INT) corrupts the incoming command in ArduPilot.
+    if (!_airUplinkInProgress || (millis() - _lastUplinkChunkMs > 100)) {
+        _localSerial.write(packet, sizeof(packet));
+    }
 #else
     // Ground: store for deferred injection at next MAVLink frame boundary.
     memcpy(_pendingStatusPkt, packet, sizeof(packet));

@@ -24,6 +24,37 @@ void E22Driver::begin(uint32_t baudRate) {
     waitForReady(200);
 }
 
+bool E22Driver::beginPassive(uint32_t baudRate) {
+    pinMode(_pinM0, OUTPUT);
+    pinMode(_pinM1, OUTPUT);
+    pinMode(_pinAux, INPUT_PULLUP);
+
+    // Passive init: Put radio into Normal Operating Mode (M0=0, M1=0)
+    // NEVER writes to EEPROM, NEVER calls configureRadio(), NEVER sends 0xC0.
+    digitalWrite(_pinM0, LOW);
+    digitalWrite(_pinM1, LOW);
+    _currentMode = E22Mode::NORMAL;
+
+    // Datasheet mode settling time (>= 2ms)
+    delay(5);
+    if (!waitForReady(200)) {
+        return false;
+    }
+
+    _serial.end();
+#if defined(ESP32)
+    _serial.begin(baudRate, SERIAL_8N1, PIN_RADIO_RX, PIN_RADIO_TX);
+#else
+    _serial.begin(baudRate);
+#endif
+
+    if (!waitForReady(200)) {
+        return false;
+    }
+
+    return true;
+}
+
 void E22Driver::setMode(E22Mode mode) {
     // Wait until radio is done with pending tasks before switching modes
     waitForReady(100);
@@ -118,6 +149,97 @@ bool E22Driver::configureRadio(uint8_t powerLevel, uint8_t channel) {
     delay(40);
 
     return success;
+}
+
+E22RegReadStatus E22Driver::readRegistersReadOnly(uint8_t* dest, size_t maxLen, size_t& readLen) {
+    readLen = 0;
+    if (dest == nullptr || maxLen < 10) {
+        return E22RegReadStatus::READ_FAILED;
+    }
+
+    // 1. Wait for AUX ready before switching mode
+    if (!waitForReady(200)) {
+        return E22RegReadStatus::READ_FAILED;
+    }
+
+    // 2. Switch to Configuration Mode (M0=LOW, M1=HIGH)
+    setMode(E22Mode::CONFIG);
+    delay(40);
+    if (!waitForReady(200)) {
+        setMode(E22Mode::NORMAL);
+        return E22RegReadStatus::READ_FAILED;
+    }
+
+    // 3. In configuration mode, E22 communicates at 9600 baud 8N1
+    _serial.end();
+#if defined(ESP32)
+    _serial.begin(9600, SERIAL_8N1, PIN_RADIO_RX, PIN_RADIO_TX);
+#else
+    _serial.begin(9600);
+#endif
+    delay(40);
+
+    // 4. Drain any stale UART input
+    while (_serial.available()) _serial.read();
+
+    // 5. Send verified read command from E22-900T30D Section 7.1:
+    // 0xC1: Read register command
+    // 0x00: Starting address
+    // 0x07: Length 7 bytes (ADDH, ADDL, NETID, REG0, REG1, REG2, REG3)
+    const uint8_t readCmd[] = {0xC1, 0x00, 0x07};
+    waitForReady(100);
+    _serial.write(readCmd, sizeof(readCmd));
+    _serial.flush();
+    delay(50);
+
+    // 6. Capture response (expected 10 bytes: 0xC1 0x00 0x07 + 7 registers)
+    uint8_t resp[16] = {0};
+    size_t respLen = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 300 && respLen < sizeof(resp)) {
+        if (_serial.available()) {
+            resp[respLen++] = (uint8_t)_serial.read();
+        } else {
+            delay(5);
+        }
+    }
+
+    // Determine read/verification status
+    E22RegReadStatus readStatus = E22RegReadStatus::OK;
+    if (respLen == 0) {
+        readStatus = E22RegReadStatus::READ_FAILED;
+    } else if (respLen < 10 || resp[0] != 0xC1 || resp[1] != 0x00 || resp[2] != 0x07) {
+        readStatus = E22RegReadStatus::REGISTERS_UNVERIFIED;
+        readLen = (respLen <= maxLen ? respLen : maxLen);
+        memcpy(dest, resp, readLen);
+    } else {
+        readStatus = E22RegReadStatus::OK;
+        readLen = (respLen <= maxLen ? respLen : maxLen);
+        memcpy(dest, resp, readLen);
+    }
+
+    // 7. Safely restore Normal Mode
+    _serial.end();
+    setMode(E22Mode::NORMAL);
+    delay(40);
+    if (!waitForReady(200)) {
+        return E22RegReadStatus::MODE_RESTORE_FAILED;
+    }
+
+    // 8. Safely restore standard modem baud
+#if defined(ESP32)
+    _serial.begin(RADIO_UART_BAUD, SERIAL_8N1, PIN_RADIO_RX, PIN_RADIO_TX);
+#else
+    _serial.begin(RADIO_UART_BAUD);
+#endif
+    delay(20);
+    while (_serial.available()) _serial.read();
+
+    if (!waitForReady(200)) {
+        return E22RegReadStatus::UART_RESTORE_FAILED;
+    }
+
+    return readStatus;
 }
 
 bool E22Driver::isBusy() const {

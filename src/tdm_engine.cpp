@@ -2,36 +2,26 @@
 
 // Standard CRC-16-CCITT (Polynomial 0x1021, Initial 0xFFFF)
 uint16_t TdmEngine::calculateCrc16(const uint8_t* data, size_t length) {
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < length; ++i) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (uint8_t j = 0; j < 8; ++j) {
-            if (crc & 0x8000) {
-                crc = (crc << 1) ^ 0x1021;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-    return crc;
+    return transport_crc16(data, length);
 }
 
 TdmEngine::TdmEngine(E22Driver& radio, NodeRole role)
     : _radio(radio),
       _role(role),
-      _currentSlot(TdmSlot::AIR_TRANSMIT),
+      _currentSlot(TdmSlot::GROUND_TRANSMIT),
       _frameStartTimeUs(0),
       _txSeqNum(0),
-      _rxState(RxState::WAIT_MAGIC0),
-      _rxBytesCount(0),
-      _rxCrc(0),
-      _rxCallback(nullptr) {}
+      _parser(role == NodeRole::AIR ? TransportNodeRole::AIR : TransportNodeRole::GROUND),
+      _rxCallback(nullptr),
+      _transportRxCallback(nullptr),
+      _stats{} {}
 
 void TdmEngine::begin() {
     _radio.begin();
     _frameStartTimeUs = micros();
     _stats.last_sync_ms = millis();
-    _stats.synchronized = (_role == NodeRole::GROUND); // Ground starts as master
+    _stats.synchronized = (_role == NodeRole::GROUND); // Ground starts as timing master
+    _parser.reset();
 }
 
 void TdmEngine::update() {
@@ -41,32 +31,37 @@ void TdmEngine::update() {
 
 void TdmEngine::updateSlotState() {
     uint32_t nowUs = micros();
-    uint32_t framePeriodUs = TDM_FRAME_PERIOD_MS * 1000;
+    uint32_t framePeriodUs = TDM_FRAME_PERIOD_MS * 1000; // 90,000 us
 
-    // Advance frame start time in 50ms periods
+    // Advance frame start time in 90ms periods
     while ((nowUs - _frameStartTimeUs) >= framePeriodUs) {
         _frameStartTimeUs += framePeriodUs;
     }
 
     uint32_t elapsedUs = nowUs - _frameStartTimeUs;
 
-    // Check for sync timeout on Air unit (1.5 seconds)
+    // Check for sync timeout on Air unit (1.5 seconds without Ground beacon)
     if (_role == NodeRole::AIR) {
         if (millis() - _stats.last_sync_ms > 1500) {
             _stats.synchronized = false;
         }
     }
 
-    uint32_t airEndUs    = TDM_AIR_SLOT_MS * 1000;
-    uint32_t guard1EndUs = airEndUs + (TDM_GUARD_GAP1_MS * 1000);
-    uint32_t groundEndUs = guard1EndUs + (TDM_GROUND_SLOT_MS * 1000);
+    // Approved Bench Schedule (90.0 ms Total Cycle):
+    // Slot 1: Ground Uplink (0 .. 32ms)
+    // Guard Gap 1:           (32 .. 37ms)
+    // Slot 2: Air Downlink  (37 .. 82ms)
+    // Guard Gap 2:           (82 .. 90ms)
+    uint32_t groundEndUs = TDM_GROUND_SLOT_MS * 1000;                // 32,000 us
+    uint32_t guard1EndUs = groundEndUs + (TDM_GUARD_GAP1_MS * 1000); // 37,000 us
+    uint32_t airEndUs    = guard1EndUs + (TDM_AIR_SLOT_MS * 1000);    // 82,000 us
 
-    if (elapsedUs < airEndUs) {
-        _currentSlot = TdmSlot::AIR_TRANSMIT;
+    if (elapsedUs < groundEndUs) {
+        _currentSlot = TdmSlot::GROUND_TRANSMIT;
     } else if (elapsedUs < guard1EndUs) {
         _currentSlot = TdmSlot::GUARD_GAP_1;
-    } else if (elapsedUs < groundEndUs) {
-        _currentSlot = TdmSlot::GROUND_TRANSMIT;
+    } else if (elapsedUs < airEndUs) {
+        _currentSlot = TdmSlot::AIR_TRANSMIT;
     } else {
         _currentSlot = TdmSlot::GUARD_GAP_2;
     }
@@ -74,76 +69,131 @@ void TdmEngine::updateSlotState() {
 
 bool TdmEngine::canTransmit() const {
     if (_role == NodeRole::AIR) {
-        // Air unit only transmits if it is synchronized to Ground master.
+        // Air unit only transmits if it is synchronized to Ground master and inside Air slot.
         // When unsynchronized, it listens continuously to prevent jamming Ground beacons.
         if (!_stats.synchronized) {
             return false;
         }
         return (_currentSlot == TdmSlot::AIR_TRANSMIT);
     } else {
+        // Ground unit only transmits inside Ground uplink slot
         return (_currentSlot == TdmSlot::GROUND_TRANSMIT);
     }
 }
 
 bool TdmEngine::sendPacket(LrsPacketType type, const uint8_t* payload, uint8_t length) {
+#if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
+    if (type == LrsPacketType::MAVLINK_DATA) {
+        // Enforce hard isolation: MAVLink RF transmission forbidden in Stage 3.1 RC-only mode
+        return false;
+    }
+#endif
+    TransportChannel chan;
+    uint8_t flags = 0;
+
+    if (type == LrsPacketType::HEARTBEAT_SYNC) {
+        chan = TransportChannel::LINK_CONTROL;
+    } else if (type == LrsPacketType::RADIO_STATUS) {
+        chan = TransportChannel::LINK_CONTROL;
+    } else if (type == LrsPacketType::RC_OVERRIDE) {
+        chan = TransportChannel::RC_CONTROL;
+    } else if (type == LrsPacketType::MAVLINK_DATA) {
+        chan = (_role == NodeRole::AIR) ? TransportChannel::MAVLINK_DOWNLINK
+                                        : TransportChannel::MAVLINK_UPLINK;
+    } else {
+        chan = TransportChannel::LINK_CONTROL;
+    }
+
+    return sendTransportFrame(chan, flags, 0, 0, payload, length);
+}
+
+bool TdmEngine::sendTransportFrame(TransportChannel channel, uint8_t flags, uint16_t transfer_id,
+                                   uint16_t frag_offset, const uint8_t* payload, uint16_t length) {
+#if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
+    if (channel == TransportChannel::MAVLINK_DOWNLINK || channel == TransportChannel::MAVLINK_UPLINK) {
+        // Enforce hard isolation: MAVLink RF channels forbidden in Stage 3.1 RC-only mode
+        return false;
+    }
+#endif
+    if (length > TRANSPORT_MAX_SINGLE_BURST_PAYLOAD) {
+        // A single-burst frame cannot carry more than the radio payload budget.
+        // Reject rather than silently changing the caller's transport payload.
+        return false;
+    }
     if (!canTransmit()) {
         return false;
     }
 
-    if (length > MAX_PAYLOAD_PER_SLOT) {
-        length = MAX_PAYLOAD_PER_SLOT;
-    }
-
-    LrsFrameHeader header;
-    header.magic0 = DUAL_LRS_MAGIC_0;
-    header.magic1 = DUAL_LRS_MAGIC_1;
-    header.packet_type = static_cast<uint8_t>(type);
-    header.seq_num = _txSeqNum;
-    header.payload_len = length;
-
-    // Compute CRC over header and payload
-    uint16_t crc = 0xFFFF;
-    crc = calculateCrc16((const uint8_t*)&header, sizeof(header));
-    if (length > 0 && payload != nullptr) {
-        // Continue CRC
-        for (size_t i = 0; i < length; ++i) {
-            crc ^= (uint16_t)payload[i] << 8;
-            for (uint8_t j = 0; j < 8; ++j) {
-                if (crc & 0x8000) {
-                    crc = (crc << 1) ^ 0x1021;
-                } else {
-                    crc <<= 1;
-                }
-            }
-        }
-    }
-
-    // Role-aware AUX busy handling:
-    // GROUND: Air packet arrives at Ground E22 at ~34.8ms (30.0ms Air tx + 4.1ms UART out).
-    //         Ground slot starts at 35ms. Wait up to 5ms (until 40ms) for Ground AUX to clear.
-    //         11-byte frame takes 8.5ms, completing by 48.5ms with 1.5ms margin before 50ms wrap.
-    // AIR:    If AUX is LOW when Air's slot starts, timing is wrong — skip rather than corrupt.
+    // Role-aware AUX busy check:
+    // Ground: wait up to 5ms for AUX to clear
+    // Air: wait up to 2ms
     if (_radio.isBusy()) {
         if (_role == NodeRole::GROUND) {
             if (!_radio.waitForReady(5)) {
-                return false; // Still busy after 5ms — skip this ground slot to guarantee no collision with 50ms wrap
+                return false; // Skip this slot to avoid spill
             }
         } else {
-            if (!_radio.waitForReady(3)) {
-                return false; // Still busy after 3ms — skip this air slot
+            if (!_radio.waitForReady(2)) {
+                return false; // Skip this slot
             }
         }
     }
 
-    // Write full frame to radio (non-blocking UART DMA/FIFO handles transmission)
-    _radio.write((const uint8_t*)&header, sizeof(header));
-    if (length > 0 && payload != nullptr) {
-        _radio.write(payload, length);
-    }
-    _radio.write((const uint8_t*)&crc, sizeof(crc));
-    // NOTE: No flush() — blocking flush() wastes 0.5-3.4ms per slot stalling
-    // the main loop. UART TX FIFO is hardware-driven; no explicit flush needed.
+    TransportHeader hdr{};
+    hdr.magic0 = TRANSPORT_MAGIC0;
+    hdr.magic1 = TRANSPORT_MAGIC1;
+    hdr.version = TRANSPORT_VERSION;
+    hdr.channel = (uint8_t)channel;
+    hdr.flags = flags;
+    hdr.sequence = _txSeqNum++;
+    hdr.transfer_id = transfer_id;
+    hdr.fragment_offset = frag_offset;
+    hdr.payload_length = length;
 
+    uint8_t wire_buf[TRANSPORT_MAX_FRAME_SIZE];
+    transport_encode_header(&hdr, wire_buf);
+
+    if (length > 0 && payload != nullptr) {
+        memcpy(&wire_buf[TRANSPORT_HEADER_SIZE], payload, length);
+    }
+
+    uint16_t crc = transport_crc16(wire_buf, TRANSPORT_HEADER_SIZE + length);
+    transport_write_u16_be(&wire_buf[TRANSPORT_HEADER_SIZE + length], crc);
+
+    size_t total_frame_len = TRANSPORT_HEADER_SIZE + length + TRANSPORT_CRC_SIZE;
+    _radio.write(wire_buf, total_frame_len);
+
+    _stats.packets_sent++;
+    return true;
+}
+
+bool TdmEngine::sendRawTransportFrame(const uint8_t* frame, size_t length) {
+#if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
+    if (length >= TRANSPORT_HEADER_SIZE && frame != nullptr) {
+        uint8_t chan = frame[3];
+        if (chan == (uint8_t)TransportChannel::MAVLINK_DOWNLINK || chan == (uint8_t)TransportChannel::MAVLINK_UPLINK) {
+            // Enforce hard isolation: MAVLink RF channels forbidden in Stage 3.1 RC-only mode
+            return false;
+        }
+    }
+#endif
+    if (!canTransmit() || frame == nullptr || length == 0 || length > TRANSPORT_MAX_FRAME_SIZE) {
+        return false;
+    }
+
+    if (_radio.isBusy()) {
+        if (_role == NodeRole::GROUND) {
+            if (!_radio.waitForReady(5)) {
+                return false;
+            }
+        } else {
+            if (!_radio.waitForReady(2)) {
+                return false;
+            }
+        }
+    }
+
+    _radio.write(frame, length);
     _txSeqNum++;
     _stats.packets_sent++;
     return true;
@@ -151,147 +201,81 @@ bool TdmEngine::sendPacket(LrsPacketType type, const uint8_t* payload, uint8_t l
 
 void TdmEngine::processIncomingRadioData() {
     uint32_t nowMs = millis();
-    // Inter-byte timeout: if > 15ms elapsed since last radio byte and frame is incomplete, reset to WAIT_MAGIC0
-    if (nowMs - _lastRxByteMs > 15 && _rxState != RxState::WAIT_MAGIC0) {
-        _rxState = RxState::WAIT_MAGIC0;
-    }
 
     while (_radio.available() > 0) {
-        _lastRxByteMs = millis();
         uint8_t b = (uint8_t)_radio.read();
+        if (_parser.feed_byte(b, nowMs)) {
+            // Valid Phase 2 frame decoded by TransportParser!
+            const TransportHeader& hdr = _parser.get_header();
+            const uint8_t* payload = _parser.get_payload();
+            uint16_t plen = _parser.get_payload_length();
 
-        switch (_rxState) {
-            case RxState::WAIT_MAGIC0:
-                if (b == DUAL_LRS_MAGIC_0) {
-                    _rxState = RxState::WAIT_MAGIC1;
-                }
-                break;
+            bool wasSync = _stats.synchronized;
+            _stats.packets_received++;
+            _stats.last_sync_ms = nowMs;
+            _stats.synchronized = true;
 
-            case RxState::WAIT_MAGIC1:
-                if (b == DUAL_LRS_MAGIC_1) {
-                    _rxHeader.magic0 = DUAL_LRS_MAGIC_0;
-                    _rxHeader.magic1 = DUAL_LRS_MAGIC_1;
-                    _rxBytesCount = 0;
-                    _rxState = RxState::WAIT_HEADER;
-                } else if (b == DUAL_LRS_MAGIC_0) {
-                    // Consecutive magic0 bytes (e.g. 0x44 0x44 0x4C) - stay in WAIT_MAGIC1
-                    _rxState = RxState::WAIT_MAGIC1;
-                } else {
-                    _rxState = RxState::WAIT_MAGIC0;
-                }
-                break;
-
-            case RxState::WAIT_HEADER:
-                ((uint8_t*)&_rxHeader)[2 + _rxBytesCount] = b;
-                _rxBytesCount++;
-                if (_rxBytesCount == sizeof(LrsFrameHeader) - 2) {
-                    if (_rxHeader.payload_len > MAX_PAYLOAD_PER_SLOT) {
-                        // Invalid length, drop frame
-                        _rxState = RxState::WAIT_MAGIC0;
-                    } else if (_rxHeader.payload_len == 0) {
-                        _rxBytesCount = 0;
-                        _rxState = RxState::WAIT_CRC;
+            // Synchronize Air node TDM frame from Ground frame arrival
+            if (_role == NodeRole::AIR) {
+                // Ground slot starts at t=0.0ms. Transfer time: ~10ms (0B sync) to ~28.5ms (39B RC)
+                uint32_t expectedArrivalUs = (plen == 0) ? 10200 : (10200 + plen * 500);
+                if (expectedArrivalUs > 32000) expectedArrivalUs = 32000;
+                uint32_t nowUs = micros();
+                if (nowUs >= expectedArrivalUs) {
+                    uint32_t targetStartUs = nowUs - expectedArrivalUs;
+                    if (!wasSync) {
+                        _frameStartTimeUs = targetStartUs;
                     } else {
-                        _rxBytesCount = 0;
-                        _rxState = RxState::WAIT_PAYLOAD;
+                        // Graduated PLL slew for crystal drift compensation
+                        int32_t err = (int32_t)(targetStartUs - _frameStartTimeUs);
+                        while (err > 45000) err -= 90000;
+                        while (err < -45000) err += 90000;
+                        _stats.last_arrival_us = (uint32_t)(nowUs - _frameStartTimeUs);
+                        _stats.last_pll_err = err;
+                        int32_t absErr = (err < 0) ? -err : err;
+                        int32_t step = 0;
+                        if      (absErr > 3000) step = 250;
+                        else if (absErr > 1000) step = 100;
+                        else if (absErr > 500)  step = 25;
+                        else if (absErr > 250)  step = 5;
+                        if (err > 0) _frameStartTimeUs += step;
+                        else if (err < 0) _frameStartTimeUs -= step;
                     }
                 }
-                break;
+            }
 
-            case RxState::WAIT_PAYLOAD:
-                _rxBuffer[_rxBytesCount++] = b;
-                if (_rxBytesCount == _rxHeader.payload_len) {
-                    _rxBytesCount = 0;
-                    _rxState = RxState::WAIT_CRC;
+            // Sequence loss tracking
+            uint16_t seqDiff = (uint16_t)(hdr.sequence - _stats.last_rx_seq);
+            if (seqDiff > 1 && seqDiff < 1000 && _stats.packets_received > 1) {
+                _stats.packets_dropped += (seqDiff - 1);
+                _stats.seq_drops += (seqDiff - 1);
+            }
+            _stats.last_rx_seq = (uint8_t)(hdr.sequence & 0xFF);
+
+            uint32_t totalPackets = _stats.packets_received + _stats.packets_dropped;
+            if (totalPackets > 0) {
+                _stats.link_quality = (uint8_t)(((uint64_t)_stats.packets_received * 100) / totalPackets);
+            }
+
+            // Dispatch native Transport callback if registered
+            if (_transportRxCallback != nullptr) {
+                _transportRxCallback(hdr, payload, plen);
+            }
+
+            // Dispatch legacy callback if registered
+            if (_rxCallback != nullptr) {
+                LrsPacketType legType = LrsPacketType::HEARTBEAT_SYNC;
+                if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_DOWNLINK ||
+                    hdr.channel == (uint8_t)TransportChannel::MAVLINK_UPLINK) {
+                    legType = LrsPacketType::MAVLINK_DATA;
+                } else if (hdr.channel == (uint8_t)TransportChannel::RC_CONTROL) {
+                    legType = LrsPacketType::RC_OVERRIDE;
+                } else if (hdr.channel == (uint8_t)TransportChannel::LINK_CONTROL) {
+                    legType = (plen == 0) ? LrsPacketType::HEARTBEAT_SYNC : LrsPacketType::RADIO_STATUS;
                 }
-                break;
-
-            case RxState::WAIT_CRC:
-                ((uint8_t*)&_rxCrc)[_rxBytesCount++] = b;
-                if (_rxBytesCount == sizeof(uint16_t)) {
-                    // Verify CRC
-                    uint16_t calcCrc = calculateCrc16((const uint8_t*)&_rxHeader, sizeof(_rxHeader));
-                    if (_rxHeader.payload_len > 0) {
-                        for (size_t i = 0; i < _rxHeader.payload_len; ++i) {
-                            calcCrc ^= (uint16_t)_rxBuffer[i] << 8;
-                            for (uint8_t j = 0; j < 8; ++j) {
-                                if (calcCrc & 0x8000) calcCrc = (calcCrc << 1) ^ 0x1021;
-                                else calcCrc <<= 1;
-                            }
-                        }
-                    }
-
-                    if (calcCrc == _rxCrc) {
-                        // Frame is valid!
-                        bool wasSync = _stats.synchronized;
-                        _stats.packets_received++;
-                        _stats.last_sync_ms = millis();
-                        _stats.synchronized = true;
-
-                        // Synchronize Air node TDM frame from Ground packets (both HEARTBEAT_SYNC and MAVLINK_DATA).
-                        // Ground packets are strictly <= MAX_PAYLOAD_GROUND_SLOT (4 bytes).
-                        // Transit delay formula linearly compensates for payload airtime and UART time:
-                        // 0B beacon: 10200us. Each byte adds ~215us (UART TX/RX @ 115200 + LoRa airtime @ 62.5k).
-                        if (_role == NodeRole::AIR &&
-                            (static_cast<LrsPacketType>(_rxHeader.packet_type) == LrsPacketType::HEARTBEAT_SYNC ||
-                             static_cast<LrsPacketType>(_rxHeader.packet_type) == LrsPacketType::MAVLINK_DATA) &&
-                            _rxHeader.payload_len <= MAX_PAYLOAD_GROUND_SLOT) {
-                            const uint32_t transitDelayUs = 10200 + ((uint32_t)_rxHeader.payload_len * 215);
-                            uint32_t expectedArrivalUs = ((TDM_AIR_SLOT_MS + TDM_GUARD_GAP1_MS) * 1000) + transitDelayUs;
-                            uint32_t nowUs = micros();
-                            if (nowUs >= expectedArrivalUs) {
-                                uint32_t targetStartUs = nowUs - expectedArrivalUs;
-                                if (!wasSync) {
-                                    _frameStartTimeUs = targetStartUs;
-                                } else {
-                                    // Graduated PLL slew:
-                                    // - Large error (>5ms): fast correction ±200us to converge in ~1 second
-                                    // - Medium error (>2ms): ±50us for ~2 second convergence
-                                    // - Small error (>500us): ±20us fine approach
-                                    // - Near lock (<500us): ±5us micro-adjust (crystal drift compensation)
-                                    // - Deadband <250us: no adjustment (rejects loop/UART jitter)
-                                    int32_t err = (int32_t)(targetStartUs - _frameStartTimeUs);
-                                    while (err > 25000) err -= 50000;
-                                    while (err < -25000) err += 50000;
-                                    _stats.last_arrival_us = (uint32_t)(nowUs - _frameStartTimeUs);
-                                    _stats.last_pll_err = err;
-                                    int32_t absErr = (err < 0) ? -err : err;
-                                    if (absErr > 3000) {
-                                        _frameStartTimeUs += err; // Fast snap using wrapped error: instantly locks phase in 1 step
-                                    } else {
-                                        int32_t step = 0;
-                                        if      (absErr > 1000) step = 100;
-                                        else if (absErr > 500)  step = 25;
-                                        else if (absErr > 250)  step = 5;
-                                        if (err > 0) _frameStartTimeUs += step;
-                                        else if (err < 0) _frameStartTimeUs -= step;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Check sequence loss
-                        uint8_t seqDiff = (uint8_t)(_rxHeader.seq_num - _stats.last_rx_seq);
-                        if (seqDiff > 1 && seqDiff < 100 && _stats.packets_received > 1) {
-                            _stats.packets_dropped += (seqDiff - 1);
-                            _stats.seq_drops += (seqDiff - 1);
-                        }
-                        _stats.last_rx_seq = _rxHeader.seq_num;
-
-                        // Dispatch callback
-                        if (_rxCallback != nullptr) {
-                            _rxCallback(static_cast<LrsPacketType>(_rxHeader.packet_type),
-                                        _rxBuffer,
-                                        _rxHeader.payload_len);
-                        }
-                    } else {
-                        _stats.packets_dropped++;
-                        _stats.crc_errors++;
-                    }
-
-                    _rxState = RxState::WAIT_MAGIC0;
-                }
-                break;
+                _rxCallback(legType, payload, (uint8_t)min((uint16_t)255, plen));
+            }
         }
     }
+    _stats.crc_errors = _parser.get_stats().crc_errors;
 }

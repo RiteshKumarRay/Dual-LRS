@@ -19,13 +19,17 @@
 *.a
 *.so
 *.dylib
+tools/test_transport_protocol_cpp
 
 # Temporary benchmark outputs and logs
 bench_params.json
 *.log
+audit/*.jsonl
+tools/rc_calibration.json
 
 # Developer context notes
 context.md
+audit.md
 
 # Python bytecode and caches
 __pycache__/

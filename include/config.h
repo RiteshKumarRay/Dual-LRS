@@ -34,10 +34,10 @@
 
 // --- Wi-Fi Telemetry Settings (ESP32 Ground Unit only - Preserved for Future) ---
 #define ENABLE_WIFI_TELEMETRY    0
-#define WIFI_STA_SSID            "Ritesh S22+"
-#define WIFI_STA_PASS            "1234554321"
+#define WIFI_STA_SSID            "DISABLED_PLACEHOLDER_SSID"
+#define WIFI_STA_PASS            "DISABLED_PLACEHOLDER_PASSWORD"
 #define WIFI_AP_SSID             "Dual-LRS-Ground"
-#define WIFI_AP_PASS             "duallrs123"
+#define WIFI_AP_PASS             "DISABLED_PLACEHOLDER_PASSWORD"
 #define WIFI_UDP_PORT            14550
 #define WIFI_CONNECT_TIMEOUT_MS  4000   // 4s timeout before auto-fallback to AP mode
 
@@ -68,8 +68,34 @@
 #define LED_PIN_OFF        HIGH
 #endif
 
+// --- Stage 3.1 RC-Only Isolation Mode ---
+// When enabled (1), completely disables production MAVLink RF traffic and FC stream requests.
+// Air and Ground nodes only exchange pure Phase 2 RC frames and LINK_CONTROL sync frames over RF.
+// Local FC parsing remains intact, but no MAVLink bytes are transmitted over the air.
+#ifndef DUAL_LRS_STAGE31_RC_ONLY
+#define DUAL_LRS_STAGE31_RC_ONLY  1
+#endif
+
+// --- Flight Controller Telemetry UART (PA2/PA3 strictly reserved) ---
+// PA2 (TX) and PA3 (RX) map to STM32F411 USART2. Must NOT be repurposed for RC.
+
+// --- Air Node CRSF Output Pinout (To Flight Controller RC_IN) ---
+// Hardware Note: BlackPill F411CE (UFQFPN48 48-pin) exposes hardware USART6 on PA11 (TX) and PA12 (RX).
+// PC6 and PC7 do NOT exist on the 48-pin F411CE package (omitted from pinout and Arduino pinmap).
+// PA11 connects to Flight Controller RC_IN. PA12 is available for bidirectional CRSF telemetry.
+#define PIN_AIR_CRSF_TX           PA11    // BlackPill TX -> FC RC_IN (USART6 TX)
+#define PIN_AIR_CRSF_RX           PA12    // BlackPill RX <- FC CRSF Telemetry (USART6 RX)
+#define AIR_CRSF_BAUD             420000  // Standard CRSF protocol baud rate
+
+// --- Ground Node RC Handset Ingest (ESP32 UART1) ---
+// Handset connected to ESP32 UART1 with 400,000 baud inverted signal (OpenI6X CRSF / S.BUS)
+#define PIN_GROUND_RC_RX          13      // ESP32 RX1 <- Handset TX
+#define PIN_GROUND_RC_TX          14      // ESP32 TX1 -> Handset RX
+#define GROUND_RC_BAUD            400000  // OpenI6X handset baud rate
+#define GROUND_RC_INVERTED        1       // Inversion enabled for OpenI6X
+
 // --- Baud Rate Settings ---
-#define RADIO_UART_BAUD    115200  // High-speed UART between BlackPill and E22
+#define RADIO_UART_BAUD    115200  // High-speed UART between MCU and E22
 #define FC_UART_BAUD       115200  // ArduPilot TELEM default baud rate
 #define GCS_USB_BAUD       115200  // USB Virtual COM Port to Mission Planner
 
@@ -84,25 +110,26 @@
 #define E22_TX_POWER_FLIGHT    0  // Register bits 00 = 30 dBm (1000 mW) - maximum range for flight
 #define E22_ACTIVE_TX_POWER    E22_TX_POWER_BENCH // Active power: change to E22_TX_POWER_FLIGHT for real flight
 
-// --- TDM Protocol Timings (Time Division Multiplexing) ---
-// Total Frame = 50ms (20 Hz cycle rate)
-#define TDM_FRAME_PERIOD_MS    50  // Total period of 1 TDM frame in milliseconds (STRICT: NEVER CHANGE)
-#define TDM_AIR_SLOT_MS        31  // Air -> Ground telemetry slot (0ms - 31ms): accommodates full 40B MAVLink payload
-#define TDM_GUARD_GAP1_MS       4  // Turnaround guard delay 1 (31ms - 35ms): 4ms margin allows Air RF + Ground UART flush
-#define TDM_GROUND_SLOT_MS     12  // Ground -> Air commands & RC slot (35ms - 47ms)
-#define TDM_GUARD_GAP2_MS       3  // Turnaround guard delay 2 (47ms - 50ms): allows Ground RF + Air UART flush
+// --- TDM Protocol Timings (Time Division Multiplexing - Phase 2 Bench Baseline) ---
+// Total Frame = 90ms (~11.1 Hz cycle rate)
+#define TDM_FRAME_PERIOD_MS    90  // Total period of 1 TDM frame in milliseconds (Approved Bench Baseline)
+#define TDM_GROUND_SLOT_MS     32  // Slot 1: Ground -> Air RC & command slot (0ms - 32ms)
+#define TDM_GUARD_GAP1_MS       5  // Turnaround guard delay 1 (32ms - 37ms)
+#define TDM_AIR_SLOT_MS        45  // Slot 2: Air -> Ground telemetry slot (37ms - 82ms)
+#define TDM_GUARD_GAP2_MS       8  // Turnaround guard delay 2 (82ms - 90ms)
 
-// Buffer Sizes
+// Buffer Sizes & Single-Burst Framing Bounds (E22 64-byte Subpacket Boundary)
 #define RADIO_BUFFER_SIZE         1024
 #if defined(DUAL_LRS_ROLE_AIR)
 #define TELEM_BUFFER_SIZE         49152 // 48KB FIFO buffer: absorbs entire ArduPilot parameter table (~38KB) without dropping any packets
 #else
 #define TELEM_BUFFER_SIZE         1024  // 1KB FIFO buffer on Ground: bounds latency to < 10 seconds under worst-case storm
 #endif
-#define MAX_PAYLOAD_AIR_SLOT      40  // 1 full MAVLink frame per slot (up to 40B): fits in 31ms air slot
-#define MAX_PAYLOAD_GROUND_SLOT   10  // 10B: 17B on-air frame finishes in ~5.2ms (by 40.2ms), leaving 6.8ms safety margin before 47ms slot end
-#define MAX_PAYLOAD_PER_SLOT      64 // Frame buffer allocation (5B header + 40B payload + 2B CRC = 47B)
+#define MAX_PAYLOAD_AIR_SLOT      49  // Max single-burst payload (64 - 13 - 2 = 49)
+#define MAX_PAYLOAD_GROUND_SLOT   49  // Max single-burst payload (RC uses 24B payload, 39B frame)
+#define MAX_PAYLOAD_PER_SLOT      49  // Single-burst limit
+#define MAX_FRAME_PER_SLOT        64  // 13B Header + 49B Payload + 2B CRC = 64B
 
-// Protocol Magic Bytes
+// Protocol Magic Bytes (Matches Phase 2 TransportHeader: 'D', 'L')
 #define DUAL_LRS_MAGIC_0      0x44 // 'D'
 #define DUAL_LRS_MAGIC_1      0x4C // 'L'

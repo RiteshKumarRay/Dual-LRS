@@ -3,6 +3,7 @@
 #include "e22_driver.h"
 #include "tdm_engine.h"
 #include "mavlink_handler.h"
+#include "rc_adapter.h"
 
 #if defined(ESP32)
 #include "soc/soc.h"
@@ -15,12 +16,16 @@
     #define SerialRadio Serial2
     const NodeRole CURRENT_ROLE = NodeRole::GROUND;
     MavlinkHandler telemHandler(Serial);
+    static RcGroundAdapter rcGroundAdapter;
 #elif defined(DUAL_LRS_ROLE_AIR)
     #define SerialRadio Serial1
     #define SerialTELEM Serial2
     const NodeRole CURRENT_ROLE = NodeRole::AIR;
     // Air unit interfaces with Flight Controller via Hardware Serial (USART2)
     MavlinkHandler telemHandler(SerialTELEM);
+    // Air unit CRSF output to FC RC_IN via Hardware USART6 (PA12 RX / PA11 TX)
+    Uart SerialAirCRSF(PIN_AIR_CRSF_RX, PIN_AIR_CRSF_TX);
+    static RcAirAdapter rcAirAdapter;
 #else
     #define SerialRadio Serial1
     #define SerialTELEM Serial2
@@ -31,6 +36,7 @@
     #else
         MavlinkHandler telemHandler(SerialTELEM);
     #endif
+    static RcGroundAdapter rcGroundAdapter;
 #endif
 
 // [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
@@ -42,6 +48,16 @@
 // Drivers and Handlers
 E22Driver radio(SerialRadio, PIN_RADIO_M0, PIN_RADIO_M1, PIN_RADIO_AUX);
 TdmEngine tdm(radio, CURRENT_ROLE);
+
+#if defined(DUAL_LRS_ROLE_AIR)
+static TransportFragmenter airDownlinkFragmenter;
+static TransportReassembler airReassembler;
+static uint8_t airTxMsgBuf[TRANSPORT_MAX_TRANSFER_SIZE];
+#else
+static TransportFragmenter groundUplinkFragmenter;
+static TransportReassembler groundReassembler;
+static uint8_t groundTxMsgBuf[TRANSPORT_MAX_TRANSFER_SIZE];
+#endif
 
 // Buffer for packing RF transmission
 static uint8_t rfTxBuffer[MAX_PAYLOAD_PER_SLOT];
@@ -63,14 +79,44 @@ static bool fcBaudLocked = false;
 static uint32_t gcsDataPktsRx = 0;
 
 void onRadioPacketReceived(LrsPacketType type, const uint8_t* payload, uint8_t length) {
-    if (type == LrsPacketType::MAVLINK_DATA && length > 0) {
-        gcsDataPktsRx++;
-        // Ground: writeToLocal() tracks frame boundaries for safe RADIO_STATUS injection.
-        // Air: writeToLocal() forwards GCS commands to FC UART.
-        telemHandler.writeToLocal(payload, length);
-    }
+    (void)type;
+    (void)payload;
+    (void)length;
+    // Active RF reception indicator
+    digitalWrite(PIN_LED_SYNC, LED_PIN_ON);
+}
 
-    // Active RF reception: turn LED on
+void onTransportFrameReceived(const TransportHeader& hdr, const uint8_t* payload, uint16_t length) {
+#if defined(DUAL_LRS_ROLE_AIR)
+    if (hdr.channel == (uint8_t)TransportChannel::RC_CONTROL) {
+        if (length >= sizeof(TransportPackedRc) && payload != nullptr) {
+            const TransportPackedRc* packed = reinterpret_cast<const TransportPackedRc*>(payload);
+            rcAirAdapter.ingest_rc_frame(*packed, millis());
+        }
+    }
+#if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
+    else if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_UPLINK) {
+        TransportNackReason nack = airReassembler.process_fragment(hdr, payload, millis());
+        if (nack == TransportNackReason::NONE && airReassembler.is_complete()) {
+            telemHandler.writeToLocal(airReassembler.get_reassembled_data(),
+                                      airReassembler.get_reassembled_length());
+            airReassembler.mark_complete_consumed();
+        }
+    }
+#endif
+#else
+#if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
+    if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_DOWNLINK) {
+        TransportNackReason nack = groundReassembler.process_fragment(hdr, payload, millis());
+        if (nack == TransportNackReason::NONE && groundReassembler.is_complete()) {
+            gcsDataPktsRx++;
+            telemHandler.writeToLocal(groundReassembler.get_reassembled_data(),
+                                      groundReassembler.get_reassembled_length());
+            groundReassembler.mark_complete_consumed();
+        }
+    }
+#endif
+#endif
     digitalWrite(PIN_LED_SYNC, LED_PIN_ON);
 }
 
@@ -113,6 +159,58 @@ static void requestStream(Stream& port, uint8_t streamId, uint16_t rateHz) {
 }
 #endif
 
+#if defined(ESP32)
+struct RcScanProfile {
+    uint32_t baud;
+    uint32_t uart_config;
+    bool invert;
+    bool is_sbus;          // always false — TX2 outputs CRSF only
+    const char* desc;
+};
+// TX2 on FS-i6X (OpenI6X) outputs CRSF inverted at configurable baudrate.
+// Radio Settings -> Hardware -> Baudrate controls TX2 rate. 400000 is the ELRS default.
+// SBUS profiles removed: PA10 is an SBUS *input*, PA9 is telemetry mirror — neither
+// is the RC output. 0x0F inside CRSF payloads was triggering false SBUS matches.
+static const RcScanProfile SCAN_PROFILES[] = {
+    {400000, SERIAL_8N1, true,  false, "400k Inv (CRSF - ELRS default, TX2)"},
+    {115200, SERIAL_8N1, true,  false, "115k Inv (CRSF - high reliability)"},
+    {420000, SERIAL_8N1, true,  false, "420k Inv (CRSF - EdgeTX/OpenTX default)"},
+    {921600, SERIAL_8N1, true,  false, "921k Inv (CRSF - high-speed)"},
+    {460800, SERIAL_8N1, true,  false, "460k Inv (CRSF - high-speed ELRS)"},
+    {115200, SERIAL_8N1, false, false, "115k Norm (CRSF 3.3V low-speed)"},
+    {400000, SERIAL_8N1, false, false, "400k Norm (CRSF 3.3V, no invert)"},
+    {420000, SERIAL_8N1, false, false, "420k Norm (CRSF 3.3V, no invert)"},
+    {921600, SERIAL_8N1, false, false, "921k Norm (CRSF - high-speed)"},
+};
+static uint8_t currentScanIdx = 0;
+static bool rcHandsetLocked = false;
+static uint32_t lastScanSwitchMs = 0;
+static uint32_t lastValidCheckCount = 0;
+
+// Standard CRSF DEVICE_INFO response (announces as ELRS v2.0 module to unlock OpenI6X channel streaming)
+static const uint8_t CRSF_DEVICE_INFO_REPLY[] = {
+    0xEA, 0x17, 0x29, 0xEA, 0xEE,
+    'E', 'L', 'R', 'S', 0x00,
+    'E', 'L', 'R', 'S',
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00,
+    0x00, 0x00, 0xB9
+};
+static uint32_t lastPingReplyMs = 0;
+
+static void sendCrsfDeviceInfoReply(uint32_t baud) {
+    Serial1.end();
+    // Temporarily reconfigure UART1 with TX on GPIO 13 (inverted) to transmit reply to radio
+    Serial1.begin(baud, SERIAL_8N1, -1, PIN_GROUND_RC_RX, true);
+    Serial1.write(CRSF_DEVICE_INFO_REPLY, sizeof(CRSF_DEVICE_INFO_REPLY));
+    Serial1.flush();
+    delayMicroseconds(60);
+    // Switch GPIO 13 back to RX
+    Serial1.end();
+    Serial1.begin(baud, SERIAL_8N1, PIN_GROUND_RC_RX, -1, true);
+}
+#endif
+
 void setup() {
     #if defined(ESP32)
         WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout detector
@@ -138,15 +236,17 @@ void setup() {
         #endif
     #endif
 
-    // [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
-    // #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
-    // wifiTelem.begin();
-    // telemHandler.setOutputCallback([](const uint8_t* buf, size_t len) {
-    //     wifiTelem.sendMavlinkPacket(buf, len);
-    // });
-    // #endif
+    #if defined(ESP32)
+        // Handset ingest on UART1 (starts with profile 0, auto-scans until locked)
+        Serial1.begin(SCAN_PROFILES[0].baud, SCAN_PROFILES[0].uart_config, PIN_GROUND_RC_RX, PIN_GROUND_RC_TX, SCAN_PROFILES[0].invert);
+        lastScanSwitchMs = millis();
+    #elif defined(DUAL_LRS_ROLE_AIR)
+        // Air CRSF output on hardware USART6 (PA11 TX / PA12 RX @ 420,000 baud)
+        SerialAirCRSF.begin(AIR_CRSF_BAUD);
+    #endif
 
     tdm.onPacketReceived(onRadioPacketReceived);
+    tdm.onTransportFrameReceived(onTransportFrameReceived);
     tdm.begin();
     telemHandler.begin();
 }
@@ -154,8 +254,86 @@ void setup() {
 void loop() {
     uint32_t now = millis();
 
-    // 1. Read bytes from local MAVLink stream (FC or Mission Planner)
+#if defined(ESP32)
+    // 1. Ingest handset RC frames from OpenI6X on UART1
+    static uint8_t rawRing[32] = {0};
+    static uint8_t rawRingIdx = 0;
+    static uint32_t lastByteUs = 0;
+
+    // Send CRSF handshake reply if radio is pinging or we do not have handset lock yet
+    if (!rcGroundAdapter.has_handset_signal(now) && (now - lastPingReplyMs >= 200)) {
+        lastPingReplyMs = now;
+        sendCrsfDeviceInfoReply(SCAN_PROFILES[currentScanIdx].baud);
+    }
+
+    while (Serial1.available() > 0) {
+        uint32_t nowUs = micros();
+        uint32_t dtUs = (lastByteUs == 0) ? 0 : (nowUs - lastByteUs);
+        lastByteUs = nowUs;
+
+        uint8_t b = (uint8_t)Serial1.read();
+        rawRing[rawRingIdx++ % 32] = b;
+        rcGroundAdapter.feed_byte(b, now, dtUs);
+    }
+
+    // If OpenI6X sent a CRSF Ping frame, reply IMMEDIATELY while PA2 is in receive mode!
+    if (rcGroundAdapter.pop_ping_request()) {
+        sendCrsfDeviceInfoReply(SCAN_PROFILES[currentScanIdx].baud);
+    }
+
+    // Auto-detect and lock exact handset baud rate and inversion
+    if (rcHandsetLocked && !rcGroundAdapter.has_handset_signal(now)) {
+        rcHandsetLocked = false;
+        lastScanSwitchMs = now;
+        lastValidCheckCount = rcGroundAdapter.get_total_valid_frames();
+    }
+    if (!rcHandsetLocked) {
+        const RcScanProfile& p = SCAN_PROFILES[currentScanIdx];
+        uint32_t validNow = rcGroundAdapter.get_total_valid_frames();
+        if (validNow >= 10 && (validNow - lastValidCheckCount >= 5)) {
+            rcHandsetLocked = true;
+            Serial.printf("{\"event\":\"HANDSET_LOCKED\",\"baud\":%lu,\"invert\":%s,\"desc\":\"%s\"}\n",
+                (unsigned long)p.baud,
+                p.invert ? "true" : "false",
+                p.desc);
+        } else if (now - lastScanSwitchMs >= 3000 && (lastByteUs == 0 || (micros() - lastByteUs > 1000000))) {
+            lastScanSwitchMs = now;
+            currentScanIdx = (currentScanIdx + 1) % (sizeof(SCAN_PROFILES) / sizeof(SCAN_PROFILES[0]));
+            Serial1.end();
+            Serial1.begin(SCAN_PROFILES[currentScanIdx].baud, SCAN_PROFILES[currentScanIdx].uart_config,
+                          PIN_GROUND_RC_RX, PIN_GROUND_RC_TX, SCAN_PROFILES[currentScanIdx].invert);
+            // Reset framing state (not stats) then capture baseline for the new profile
+            rcGroundAdapter.reset_protocol();
+            lastValidCheckCount = rcGroundAdapter.get_total_valid_frames();
+            const RcScanProfile& np = SCAN_PROFILES[currentScanIdx];
+            Serial.printf("{\"event\":\"SCAN_TRY\",\"idx\":%u,\"baud\":%lu,\"invert\":%s,\"desc\":\"%s\"}\n",
+                currentScanIdx,
+                (unsigned long)np.baud,
+                np.invert ? "true" : "false",
+                np.desc);
+        }
+    }
+#elif defined(DUAL_LRS_ROLE_AIR)
+    // 1. Update Air RC failsafe watchdog and emit 26B CRSF frame to FC RC_IN on PA11
+    rcAirAdapter.update(now);
+    if (rcAirAdapter.has_new_frame()) {
+        uint8_t fc_crsf_buf[CRSF_FRAME_RC_TOTAL_SIZE];
+        size_t fc_crsf_len = rcAirAdapter.get_fc_frame(fc_crsf_buf);
+        rcAirAdapter.clear_new_frame();
+        if (fc_crsf_len > 0) {
+            SerialAirCRSF.write(fc_crsf_buf, fc_crsf_len);
+        }
+    }
+#endif
+
+    // 2. Read bytes from local MAVLink stream (FC or Mission Planner)
     telemHandler.readFromLocal();
+
+#if defined(DUAL_LRS_ROLE_AIR)
+    airReassembler.check_timeout(now);
+#else
+    groundReassembler.check_timeout(now);
+#endif
 
     // [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
     // #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
@@ -186,32 +364,38 @@ void loop() {
     #endif
 
     #if defined(DUAL_LRS_ROLE_AIR)
+    static uint8_t reqCount = 0;
+    #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
     // Request telemetry streams from ArduPilot on startup (or after baud switch).
     static uint32_t lastStreamReqMs = 0;
-    static uint8_t  reqCount = 0;
     if ((reqCount < 8 || (now - telemHandler.lastValidPacketMs() > 5000)) && (now - lastStreamReqMs >= 2500)) {
         lastStreamReqMs = now;
         if (reqCount < 8) reqCount++;
-        requestStream(SerialTELEM, 2,  2); // SYS_STATUS (Battery)    at 2 Hz
+        requestStream(SerialTELEM, 2,  1); // SYS_STATUS (Battery)    at 1 Hz
         requestStream(SerialTELEM, 6,  2); // POSITION (GPS)           at 2 Hz
-        requestStream(SerialTELEM, 1,  2); // EXTRA1 (Attitude)        at 2 Hz
-        requestStream(SerialTELEM, 10, 2); // EXTRA2 (VFR_HUD)         at 2 Hz
+        requestStream(SerialTELEM, 10, 4); // EXTRA1 (Attitude)        at 4 Hz
+        requestStream(SerialTELEM, 11, 2); // EXTRA2 (VFR_HUD)         at 2 Hz
     }
+    #endif
 
     // Auto-Baud scanner for Flight Controller UART:
     // Locks when valid Heartbeat packets arrive from ArduPilot.
-    // If no valid Heartbeat for 4.0s, cycle to the next baud rate (115200 -> 57600 -> 230400).
-    if (telemHandler.validHeartbeats() > 0 && (now - telemHandler.lastHeartbeatMs() < 5000)) {
-        fcBaudLocked = true;
-    } else {
-        fcBaudLocked = false;
-        if (now - lastBaudSwitchMs >= 4000) {
-            lastBaudSwitchMs = now;
-            fcBaudIdx = (fcBaudIdx + 1) % (sizeof(FC_BAUDS) / sizeof(FC_BAUDS[0]));
-            currentFcBaud = FC_BAUDS[fcBaudIdx];
-            SerialTELEM.end();
-            SerialTELEM.begin(currentFcBaud);
-            reqCount = 0; // re-request streams on the new baud rate
+    // Once locked, it stays permanently locked to prevent comms blackouts during active operations.
+    static bool fcBaudPermanentlyLocked = false;
+    if (!fcBaudPermanentlyLocked) {
+        if (telemHandler.validHeartbeats() > 0 && (now - telemHandler.lastHeartbeatMs() < 5000)) {
+            fcBaudLocked = true;
+            fcBaudPermanentlyLocked = true;
+        } else {
+            fcBaudLocked = false;
+            if (now - lastBaudSwitchMs >= 4000) {
+                lastBaudSwitchMs = now;
+                fcBaudIdx = (fcBaudIdx + 1) % (sizeof(FC_BAUDS) / sizeof(FC_BAUDS[0]));
+                currentFcBaud = FC_BAUDS[fcBaudIdx];
+                SerialTELEM.end();
+                SerialTELEM.begin(currentFcBaud);
+                reqCount = 0; // re-request streams on the new baud rate
+            }
         }
     }
     #endif
@@ -230,8 +414,6 @@ void loop() {
                         : (slot == TdmSlot::GROUND_TRANSMIT);
 
     static uint32_t gcsMavlinkRfSent = 0;
-    static uint8_t pendingBytesToSend = 0;
-    static bool hasPendingTx = false;
 
     static uint32_t lastTxStartUs = 0;
     static uint32_t lastTxAuxUs = 0;
@@ -246,46 +428,92 @@ void loop() {
 
     if (inMySlot) {
         if (!sentThisSlot) {
-            size_t maxBytes = (CURRENT_ROLE == NodeRole::GROUND)
-                                ? MAX_PAYLOAD_GROUND_SLOT
-                                : MAX_PAYLOAD_AIR_SLOT;
-
-            if (!hasPendingTx) {
-                size_t n = telemHandler.getOutboundPayload(rfTxBuffer, maxBytes);
-                pendingBytesToSend = (uint8_t)n;
-                hasPendingTx = true;
-            }
-
+            sentThisSlot = true; // Exactly 1 attempt per 90ms cycle to prevent slot spill
             bool ok = false;
             lastTxStartUs = micros();
-            if (pendingBytesToSend > 0) {
-#if defined(DUAL_LRS_ROLE_AIR) && defined(USBCON)
-                if (Serial && rfTxBuffer[0] == 0xFD && pendingBytesToSend >= 10) {
-                    uint32_t mid = rfTxBuffer[7] | ((uint32_t)rfTxBuffer[8] << 8) | ((uint32_t)rfTxBuffer[9] << 16);
-                    if (mid == 22) {
-                        Serial.printf("[AIR_TX_PARAM] Sent PARAM_VALUE over RF (%u B)\n", (unsigned int)pendingBytesToSend);
+
+            if (CURRENT_ROLE == NodeRole::GROUND) {
+#if !defined(DUAL_LRS_ROLE_AIR)
+                TransportPackedRc packed_rc;
+                bool has_rc = rcGroundAdapter.get_packed_rc(&packed_rc, now);
+
+                // Priority 1: Handset RC control (unconditional)
+                // When handset is active, send RC_CONTROL
+                // If GCS uplink MAVLink is pending (and Stage 3.1 RC-only mode is OFF),
+                // allow 1 uplink slot every 4 slots (or when handset is inactive)
+                bool send_rc = has_rc;
+                static uint8_t slotsSinceRc = 0;
+#if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
+                bool has_uplink_mavlink = groundUplinkFragmenter.has_next_fragment() || telemHandler.hasOutboundData();
+                if (has_rc && has_uplink_mavlink && slotsSinceRc >= 3) {
+                    send_rc = false;
+                    slotsSinceRc = 0;
+                } else if (has_rc) {
+                    send_rc = true;
+                    slotsSinceRc++;
+                }
+
+                if (!send_rc && has_uplink_mavlink) {
+                    if (!groundUplinkFragmenter.has_next_fragment()) {
+                        size_t pkt_len = telemHandler.getOutboundPacket(groundTxMsgBuf, sizeof(groundTxMsgBuf));
+                        if (pkt_len > 0) {
+                            groundUplinkFragmenter.start_transfer(TransportChannel::MAVLINK_UPLINK, groundTxMsgBuf, (uint16_t)pkt_len, false);
+                        }
+                    }
+                    if (groundUplinkFragmenter.has_next_fragment()) {
+                        uint8_t frame_buf[TRANSPORT_MAX_FRAME_SIZE];
+                        size_t frame_len = groundUplinkFragmenter.get_next_fragment(frame_buf, tdm.getNextSequence());
+                        if (frame_len > 0) {
+                            ok = tdm.sendRawTransportFrame(frame_buf, frame_len);
+                            if (ok) gcsMavlinkRfSent++;
+                        }
                     }
                 }
 #endif
-                ok = tdm.sendPacket(LrsPacketType::MAVLINK_DATA, rfTxBuffer, pendingBytesToSend);
-                if (ok) gcsMavlinkRfSent++;
+                // RC transmission remains enabled in every production mode.
+                if (send_rc) {
+                    ok = tdm.sendTransportFrame(TransportChannel::RC_CONTROL,
+                                                TRANSPORT_FLAG_FIRST_FRAG | TRANSPORT_FLAG_LAST_FRAG,
+                                                0, 0, (const uint8_t*)&packed_rc, sizeof(TransportPackedRc));
+                } else if (!ok) {
+                    // Fallback beacon if no RC and no MAVLink sent
+                    ok = tdm.sendTransportFrame(TransportChannel::LINK_CONTROL,
+                                                TRANSPORT_FLAG_FIRST_FRAG | TRANSPORT_FLAG_LAST_FRAG,
+                                                0, 0, nullptr, 0);
+                }
+#endif
             } else {
-                ok = tdm.sendPacket(LrsPacketType::HEARTBEAT_SYNC, nullptr, 0);
+                // CURRENT_ROLE == NodeRole::AIR (Air slot: 45 ms)
+#if defined(DUAL_LRS_ROLE_AIR)
+#if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
+                // Stage 3.2 MAVLink Downlink Telemetry (Air -> Ground)
+                if (!airDownlinkFragmenter.has_next_fragment()) {
+                    size_t pkt_len = telemHandler.getOutboundPacket(airTxMsgBuf, sizeof(airTxMsgBuf));
+                    if (pkt_len > 0) {
+                        airDownlinkFragmenter.start_transfer(TransportChannel::MAVLINK_DOWNLINK, airTxMsgBuf, (uint16_t)pkt_len, false);
+                    }
+                }
+                if (airDownlinkFragmenter.has_next_fragment()) {
+                    uint8_t frame_buf[TRANSPORT_MAX_FRAME_SIZE];
+                    size_t frame_len = airDownlinkFragmenter.get_next_fragment(frame_buf, tdm.getNextSequence());
+                    if (frame_len > 0) {
+                        ok = tdm.sendRawTransportFrame(frame_buf, frame_len);
+                        if (ok) gcsMavlinkRfSent++;
+                    }
+                }
+#else
+                // STAGE 3.1 RC-ONLY MODE: Air transmits nothing to keep downlinks completely clean
+                ok = true;
+#endif
+#endif
             }
+
             if (ok) {
-                sentThisSlot = true;
-                hasPendingTx = false;
-                pendingBytesToSend = 0;
                 trackingTxAux = true;
             }
         }
     } else {
         sentThisSlot = false;
-        // Do NOT discard pendingBytesToSend if transmission could not occur in this slot!
-        // The popped bytes are safely buffered in rfTxBuffer and will be transmitted in the next slot.
-        if (pendingBytesToSend == 0) {
-            hasPendingTx = false;
-        }
     }
 
     // 4. RADIO_STATUS injection
@@ -320,6 +548,7 @@ void loop() {
         telemHandler.injectRadioStatus(200, 200, txbufPct, 0);
     }
     #else
+    #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
     // Ground: 1 Hz diagnostic report in RADIO_STATUS
     if (now - lastStatusInjectMs >= 1000) {
         lastStatusInjectMs = now;
@@ -330,6 +559,38 @@ void loop() {
         uint8_t rfSent = (uint8_t)(gcsMavlinkRfSent & 0xFF);
         uint8_t txQueueBytes = (uint8_t)(telemHandler.pendingBytes() > 255 ? 255 : telemHandler.pendingBytes());
         telemHandler.injectRadioStatus(dataPkts, rfSent, txQueueBytes, droppedCount, txPackets);
+    }
+    #endif
+    #endif
+
+    #if defined(ESP32)
+    // Ground USB Live Monitor: emits 10 Hz status for live visualization / calibration
+    static uint32_t lastGroundLogMs = 0;
+    if (Serial && (now - lastGroundLogMs >= 100)) {
+        lastGroundLogMs = now;
+        const RcAdapterStats& rcStats = rcGroundAdapter.get_stats();
+        const uint16_t* ch = rcGroundAdapter.get_channels();
+        bool active = rcGroundAdapter.has_handset_signal(now);
+        if (true) {  // Always emit so monitor shows scan progress + signal absence
+            const uint8_t* raw22 = rcGroundAdapter.get_raw_channels22();
+            char hexBuf[45] = {0};
+            if (raw22) {
+                for (int i = 0; i < 22; i++) sprintf(&hexBuf[i*2], "%02X", raw22[i]);
+            }
+            char wireBuf[65] = {0};
+            for (int i = 0; i < 32; i++) sprintf(&wireBuf[i*2], "%02X", rawRing[(rawRingIdx + i) % 32]);
+            Serial.printf("{\"event\":\"RC_GROUND_IN\",\"active\":%s,\"sbus\":%s,\"crsf_ok\":%lu,\"frames\":%lu,\"rf_tx\":%lu,\"crc_err\":%lu,\"wire\":\"%s\",\"hex\":\"%s\",\"ch\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}\n",
+                active ? "true" : "false",
+                rcGroundAdapter.is_using_sbus() ? "true" : "false",
+                (unsigned long)rcGroundAdapter.get_crsf_valid_frames(),
+                (unsigned long)rcStats.crsf_frames_in,
+                (unsigned long)rcStats.rf_frames_sent,
+                (unsigned long)rcStats.crsf_crc_errors,
+                wireBuf,
+                hexBuf,
+                ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
+                ch[8], ch[9], ch[10], ch[11], ch[12], ch[13], ch[14], ch[15]);
+        }
     }
     #endif
 
@@ -346,6 +607,23 @@ void loop() {
     }
 
     #if defined(DUAL_LRS_ROLE_AIR) && defined(USBCON)
+    static uint32_t lastAirRcLogMs = 0;
+    if (Serial && (now - lastAirRcLogMs >= 50)) {
+        lastAirRcLogMs = now;
+        const uint16_t* ch = rcAirAdapter.get_channels();
+        char jsonBuf[220];
+        int n = snprintf(jsonBuf, sizeof(jsonBuf),
+            "{\"event\":\"RC_AIR_RX\",\"rf_rx\":%lu,\"failsafe\":%s,\"fs_events\":%lu,\"ch\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}\n",
+            (unsigned long)rcAirAdapter.get_stats().rf_frames_received,
+            rcAirAdapter.is_failsafe_active() ? "true" : "false",
+            (unsigned long)rcAirAdapter.get_stats().failsafe_events,
+            ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
+            ch[8], ch[9], ch[10], ch[11], ch[12], ch[13], ch[14], ch[15]);
+        if (n > 0) {
+            Serial.write((const uint8_t*)jsonBuf, (size_t)n);
+        }
+    }
+
     static uint32_t lastAirDiagMs = 0;
     if (Serial && (now - lastAirDiagMs >= 1000)) {
         lastAirDiagMs = now;

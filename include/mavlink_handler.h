@@ -46,6 +46,12 @@ public:
     // Pull a chunk of outbound telemetry to transmit over radio slot (transparent FIFO).
     size_t getOutboundPayload(uint8_t* dest, size_t maxLen);
 
+    // Check if any outbound MAVLink data is pending
+    bool hasOutboundData() const;
+
+    // Pull an intact, complete MAVLink packet for Phase 2 transport fragmentation
+    size_t getOutboundPacket(uint8_t* dest, size_t maxPacketLen);
+
     // Feed inbound payload received from radio into local port (FC or GCS).
     // On Ground unit: runs a MAVLink parser so RADIO_STATUS is only injected
     // between complete frames — never mid-packet (prevents stream corruption).
@@ -129,11 +135,32 @@ private:
     uint8_t  _hbLen = 0;
     bool     _hbPending = false;
 
-    // High-priority urgent response cache (bypasses 48KB param queue on Air: STATUSTEXT, MISSION_COUNT, COMMAND_ACK)
+    // Dedicated Mission Cache: isolates mission protocol handshakes (MISSION_COUNT,
+    // MISSION_REQUEST, MISSION_ITEM, MISSION_ACK) from STATUSTEXT and FIFO telemetry.
+    uint8_t  _missionCache[64];
+    uint8_t  _missionLen = 0;
+    bool     _missionPending = false;
+    bool     _missionSending = false;
+    uint32_t _lastMissionIngestMs = 0;
+
+    // High-priority urgent response cache (STATUSTEXT, COMMAND_ACK, PARAM_SET)
     uint8_t  _urgentCache[128];
     uint8_t  _urgentLen = 0;
     bool     _urgentPending = false;
     bool     _urgentSending = false;
+
+    // Air-side uplink frame boundary tracker (prevents RADIO_STATUS mid-frame splicing on Air)
+    enum class AirUplinkState {
+        IDLE,
+        V1_LEN,
+        V2_LEN,
+        IN_FRAME
+    };
+    AirUplinkState _airUplinkState = AirUplinkState::IDLE;
+    uint16_t _airUplinkExpectedLen = 0;
+    uint16_t _airUplinkCount = 0;
+    bool     _airUplinkInProgress = false;
+    uint32_t _lastUplinkChunkMs = 0;
 
     // Ground frame assembly buffer: guarantees only complete MAVLink frames are written to GCS
     uint8_t  _gndFrameBuf[296];
