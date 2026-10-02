@@ -268,6 +268,39 @@ Keep the default `DUAL_LRS_STAGE31_RC_ONLY=1` configuration. Do not enable
 Stage 3.2 for flight use until the reliability and physical bench gates are
 completed; perform all bench tests with propellers removed.
 
+### RC Rate Ceiling and Optimization Target
+
+The current 90 ms TDM cycle provides one fresh Ground-to-Air RC opportunity
+per cycle:
+
+```text
+1 / 0.090 s = approximately 11.1 fresh RC updates per second
+```
+
+This is a schedule limit, not an absolute MCU or CRSF limit. The E22 UART modem
+and half-duplex RF turnaround are the limiting factors. A packed RC transport
+frame is 39 bytes, and measured modem timing for comparable frames is
+approximately 28–30 ms before guard time and scheduling margin. Repeating an
+old RC frame faster on the Air CRSF UART would not increase the fresh RF
+control rate.
+
+After ACK/NACK, retry, packet-loss, and real-modem coexistence testing is
+complete, the intended optimization targets are:
+
+| Operating mode | Engineering target |
+| :--- | :---: |
+| Current verified bidirectional baseline | 11.1 Hz |
+| Optimized RC plus MAVLink mode | 15–20 Hz |
+| RC-priority mode with reduced telemetry | 20–30 Hz |
+| 50–100 Hz | Not a realistic target for this modem architecture |
+
+The rate must not be increased by simply shortening the TDM period. The next
+optimization step is to measure worst-case 39-byte RC airtime, 64-byte
+downlink airtime, AUX busy duration, jitter, and packet loss, then reduce guard
+time only with demonstrated margin. RC freshness, maximum control-data age,
+failsafe behavior, and RC latency under saturated MAVLink traffic are more
+important than the nominal update frequency.
+
 ---
 
 ## 8. Repository Layout

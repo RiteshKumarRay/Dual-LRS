@@ -64,3 +64,17 @@ transparent channel-number bridge.
 
 Until these blockers are closed, Stage 3.2 should remain a development/test
 configuration and the default RC-only mode should not be changed.
+
+## RC rate interpretation
+
+The current 90 ms TDM cycle yields approximately 11.1 fresh RC updates per
+second. This is a schedule limit, not the maximum capability of the MCU or
+the 420,000-baud CRSF UART. The E22 modem's approximately 28–30 ms transfer
+time for a packed RC frame, half-duplex turnaround, guard intervals, and the
+need to retain Air-to-Ground telemetry determine the practical limit.
+
+The engineering target after reliability and physical modem testing is
+approximately 15–20 Hz with telemetry, or approximately 20–30 Hz in an
+RC-priority mode with reduced telemetry. A 50–100 Hz fresh RF RC rate is not a
+realistic target for this UART modem architecture. The Air unit must not repeat
+stale RC frames merely to create a higher apparent CRSF output rate.
