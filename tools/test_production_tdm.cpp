@@ -86,9 +86,10 @@ void reset_mock_radio() {
     } while(0)
 
 // =============================================================================
-// 1. TEST 90MS CYCLE AND EXACT SLOT BOUNDARIES
 // =============================================================================
-bool test_90ms_schedule_boundaries() {
+// 1. TEST CONFIGURED CYCLE AND EXACT SLOT BOUNDARIES
+// =============================================================================
+bool test_configured_schedule_boundaries() {
     reset_mock_radio();
     set_mock_time_us(0);
 
@@ -96,78 +97,77 @@ bool test_90ms_schedule_boundaries() {
     TdmEngine ground_tdm(radio, NodeRole::GROUND);
     ground_tdm.begin();
 
-    // Schedule:
-    // Slot 1 (Ground TX): 0 .. 32,000 us (32 ms)
-    // Guard Gap 1:       32,000 .. 37,000 us (5 ms)
-    // Slot 2 (Air TX):   37,000 .. 82,000 us (45 ms)
-    // Guard Gap 2:       82,000 .. 90,000 us (8 ms)
+    uint32_t groundEndUs   = TDM_GROUND_SLOT_MS * 1000;
+    uint32_t guard1EndUs   = groundEndUs + (TDM_GUARD_GAP1_MS * 1000);
+    uint32_t airEndUs      = guard1EndUs + (TDM_AIR_SLOT_MS * 1000);
+    uint32_t framePeriodUs = TDM_FRAME_PERIOD_MS * 1000;
 
     // At t = 0
     ground_tdm.update();
     TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GROUND_TRANSMIT, "t=0 must be GROUND_TRANSMIT");
     TEST_ASSERT(ground_tdm.canTransmit(), "Ground canTransmit at t=0");
 
-    // At t = 16,000 us (mid ground slot)
-    set_mock_time_us(16000);
+    // Mid ground slot
+    set_mock_time_us(groundEndUs / 2);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GROUND_TRANSMIT, "t=16ms must be GROUND_TRANSMIT");
-    TEST_ASSERT(ground_tdm.canTransmit(), "Ground canTransmit at t=16ms");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GROUND_TRANSMIT, "mid-ground must be GROUND_TRANSMIT");
+    TEST_ASSERT(ground_tdm.canTransmit(), "Ground canTransmit at mid-ground");
 
-    // At t = 31,999 us (boundary before guard 1)
-    set_mock_time_us(31999);
+    // Boundary before guard 1
+    set_mock_time_us(groundEndUs - 1);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GROUND_TRANSMIT, "t=31.999ms must be GROUND_TRANSMIT");
-    TEST_ASSERT(ground_tdm.canTransmit(), "Ground canTransmit at t=31.999ms");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GROUND_TRANSMIT, "before guard1 must be GROUND_TRANSMIT");
+    TEST_ASSERT(ground_tdm.canTransmit(), "Ground canTransmit before guard1");
 
-    // At t = 32,000 us (start of Guard Gap 1)
-    set_mock_time_us(32000);
+    // Start of Guard Gap 1
+    set_mock_time_us(groundEndUs);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_1, "t=32ms must be GUARD_GAP_1");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_1, "start guard1 must be GUARD_GAP_1");
     TEST_ASSERT(!ground_tdm.canTransmit(), "Ground must not transmit in GUARD_GAP_1");
 
-    // At t = 36,999 us (end of Guard Gap 1)
-    set_mock_time_us(36999);
+    // End of Guard Gap 1
+    set_mock_time_us(guard1EndUs - 1);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_1, "t=36.999ms must be GUARD_GAP_1");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_1, "end guard1 must be GUARD_GAP_1");
     TEST_ASSERT(!ground_tdm.canTransmit(), "Ground must not transmit in GUARD_GAP_1");
 
-    // At t = 37,000 us (start of Air TX slot)
-    set_mock_time_us(37000);
+    // Start of Air TX slot
+    set_mock_time_us(guard1EndUs);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "t=37ms must be AIR_TRANSMIT");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "start air slot must be AIR_TRANSMIT");
     TEST_ASSERT(!ground_tdm.canTransmit(), "Ground must not transmit in AIR_TRANSMIT slot");
 
-    // At t = 81,999 us (end of Air TX slot)
-    set_mock_time_us(81999);
+    // End of Air TX slot
+    set_mock_time_us(airEndUs - 1);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "t=81.999ms must be AIR_TRANSMIT");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "end air slot must be AIR_TRANSMIT");
     TEST_ASSERT(!ground_tdm.canTransmit(), "Ground must not transmit in AIR_TRANSMIT slot");
 
-    // At t = 82,000 us (start of Guard Gap 2)
-    set_mock_time_us(82000);
+    // Start of Guard Gap 2
+    set_mock_time_us(airEndUs);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_2, "t=82ms must be GUARD_GAP_2");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_2, "start guard2 must be GUARD_GAP_2");
     TEST_ASSERT(!ground_tdm.canTransmit(), "Ground must not transmit in GUARD_GAP_2");
 
-    // At t = 89,999 us (end of Guard Gap 2)
-    set_mock_time_us(89999);
+    // End of Guard Gap 2
+    set_mock_time_us(framePeriodUs - 1);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_2, "t=89.999ms must be GUARD_GAP_2");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_2, "end guard2 must be GUARD_GAP_2");
     TEST_ASSERT(!ground_tdm.canTransmit(), "Ground must not transmit in GUARD_GAP_2");
 
-    // At t = 90,000 us (wrap to cycle 2 start)
-    set_mock_time_us(90000);
+    // Wrap to cycle 2 start
+    set_mock_time_us(framePeriodUs);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GROUND_TRANSMIT, "t=90ms must wrap to GROUND_TRANSMIT");
-    TEST_ASSERT(ground_tdm.canTransmit(), "Ground canTransmit at t=90ms");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::GROUND_TRANSMIT, "framePeriod must wrap to GROUND_TRANSMIT");
+    TEST_ASSERT(ground_tdm.canTransmit(), "Ground canTransmit at framePeriod wrap");
 
-    // Multi-cycle wrap check at t = 270,000 + 40,000 us = 310,000 us (cycle 4, air slot)
-    set_mock_time_us(310000);
+    // Multi-cycle wrap check (cycle 4, air slot)
+    set_mock_time_us(framePeriodUs * 3 + guard1EndUs + 1000);
     ground_tdm.update();
-    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "t=310ms must be AIR_TRANSMIT");
+    TEST_ASSERT(ground_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "cycle 4 air slot must be AIR_TRANSMIT");
     TEST_ASSERT(!ground_tdm.canTransmit(), "Ground must not transmit in cycle 4 AIR_TRANSMIT");
 
-    std::cout << "  [PASS] test_90ms_schedule_boundaries\n";
+    std::cout << "  [PASS] test_configured_schedule_boundaries (" << TDM_FRAME_PERIOD_MS << "ms cycle)\n";
     return true;
 }
 
@@ -184,8 +184,9 @@ bool test_air_unsynchronized_safety() {
 
     TEST_ASSERT(!air_tdm.getStats().synchronized, "Air node must boot unsynchronized");
 
-    // Even inside Air slot (t = 50ms), unsynchronized Air must NOT transmit
-    set_mock_time_us(50000);
+    // Even inside Air slot, unsynchronized Air must NOT transmit
+    uint32_t airMidUs = (TDM_GROUND_SLOT_MS + TDM_GUARD_GAP1_MS) * 1000 + (TDM_AIR_SLOT_MS * 1000) / 2;
+    set_mock_time_us(airMidUs);
     air_tdm.update();
     TEST_ASSERT(air_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "Slot must be AIR_TRANSMIT");
     TEST_ASSERT(!air_tdm.canTransmit(), "Unsynchronized Air MUST NOT be allowed to transmit");
@@ -244,8 +245,9 @@ bool test_air_sync_and_transmission() {
     TEST_ASSERT(air_tdm.getStats().synchronized, "Air node must become synchronized upon valid Ground frame");
     TEST_ASSERT(air_tdm.getStats().packets_received == 1, "packets_received must increment to 1");
 
-    // Advance into Air downlink slot (t = 50,000 us)
-    set_mock_time_us(50000);
+    // Advance into Air downlink slot
+    uint32_t airMidUs = (TDM_GROUND_SLOT_MS + TDM_GUARD_GAP1_MS) * 1000 + (TDM_AIR_SLOT_MS * 1000) / 2;
+    set_mock_time_us(airMidUs);
     air_tdm.update();
 
     TEST_ASSERT(air_tdm.getCurrentSlot() == TdmSlot::AIR_TRANSMIT, "Must be AIR_TRANSMIT slot");
@@ -271,8 +273,9 @@ bool test_air_sync_and_transmission() {
     uint16_t wire_crc = transport_read_u16_be(&s_radio_tx_history[25]);
     TEST_ASSERT(tx_crc == wire_crc, "Transmitted frame CRC mismatch");
 
-    // Advance into Guard Gap 2 (t = 85,000 us)
-    set_mock_time_us(85000);
+    // Advance into Guard Gap 2
+    uint32_t guard2MidUs = (TDM_FRAME_PERIOD_MS * 1000) - ((TDM_GUARD_GAP2_MS * 1000) / 2);
+    set_mock_time_us(guard2MidUs);
     air_tdm.update();
     TEST_ASSERT(air_tdm.getCurrentSlot() == TdmSlot::GUARD_GAP_2, "Must be GUARD_GAP_2");
     TEST_ASSERT(!air_tdm.canTransmit(), "Air must NOT transmit in GUARD_GAP_2");
@@ -348,7 +351,7 @@ bool test_frame_constraints_and_clamping() {
     TEST_ASSERT(s_radio_tx_history[1] == TRANSPORT_MAGIC1, "Magic1 mismatch");
     TEST_ASSERT(s_radio_tx_history[3] == (uint8_t)TransportChannel::RC_CONTROL, "Channel mismatch");
 
-    // 2. Send oversized payload (> 49 bytes): must clamp to 49 bytes
+    // 2. Reject oversized payload (> 49 bytes): must reject to prevent silent truncation
     s_radio_tx_history.clear();
     uint8_t oversized[100];
     memset(oversized, 0xEE, sizeof(oversized));
@@ -356,15 +359,25 @@ bool test_frame_constraints_and_clamping() {
     ok = ground_tdm.sendTransportFrame(TransportChannel::RC_CONTROL,
                                        TRANSPORT_FLAG_FIRST_FRAG,
                                        2, 0, oversized, 100);
-    TEST_ASSERT(ok, "sendTransportFrame oversized failed");
-    // Wire size: 13 header + 49 clamped payload + 2 CRC = 64 bytes (exact TRANSPORT_MAX_FRAME_SIZE)
-    TEST_ASSERT(s_radio_tx_history.size() == TRANSPORT_MAX_FRAME_SIZE, "Frame must be clamped to 64 bytes");
+    TEST_ASSERT(!ok, "sendTransportFrame oversized must be rejected");
+    TEST_ASSERT(s_radio_tx_history.empty(), "No bytes should be written to radio for oversized frame");
+
+    // 3. Send exact max-budget payload (49 bytes): must succeed and yield 64-byte frame
+    s_radio_tx_history.clear();
+    uint8_t max_payload[TRANSPORT_MAX_SINGLE_BURST_PAYLOAD];
+    memset(max_payload, 0xAA, sizeof(max_payload));
+
+    ok = ground_tdm.sendTransportFrame(TransportChannel::RC_CONTROL,
+                                       TRANSPORT_FLAG_FIRST_FRAG,
+                                       2, 0, max_payload, TRANSPORT_MAX_SINGLE_BURST_PAYLOAD);
+    TEST_ASSERT(ok, "sendTransportFrame 49B payload failed");
+    TEST_ASSERT(s_radio_tx_history.size() == TRANSPORT_MAX_FRAME_SIZE, "Frame must be exactly 64 bytes");
     uint16_t wire_plen = transport_read_u16_be(&s_radio_tx_history[11]);
     TEST_ASSERT(wire_plen == TRANSPORT_MAX_SINGLE_BURST_PAYLOAD, "Payload len in header must be 49");
 
     uint16_t calc_crc = transport_crc16(s_radio_tx_history.data(), 62);
     uint16_t frame_crc = transport_read_u16_be(&s_radio_tx_history[62]);
-    TEST_ASSERT(calc_crc == frame_crc, "Clamped frame CRC mismatch");
+    TEST_ASSERT(calc_crc == frame_crc, "64B frame CRC mismatch");
 
     std::cout << "  [PASS] test_frame_constraints_and_clamping\n";
     return true;
@@ -505,7 +518,7 @@ int main() {
     std::cout << "Running Dual-LRS Step 3.1.1 Production TDM Host Tests\n";
     std::cout << "====================================================\n";
 
-    if (!test_90ms_schedule_boundaries()) return 1;
+    if (!test_configured_schedule_boundaries()) return 1;
     if (!test_air_unsynchronized_safety()) return 1;
     if (!test_air_sync_and_transmission()) return 1;
     if (!test_air_sync_timeout()) return 1;

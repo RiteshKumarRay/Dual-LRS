@@ -110,13 +110,37 @@
 #define E22_TX_POWER_FLIGHT    0  // Register bits 00 = 30 dBm (1000 mW) - maximum range for flight
 #define E22_ACTIVE_TX_POWER    E22_TX_POWER_BENCH // Active power: change to E22_TX_POWER_FLIGHT for real flight
 
-// --- TDM Protocol Timings (Time Division Multiplexing - Phase 2 Bench Baseline) ---
-// Total Frame = 90ms (~11.1 Hz cycle rate)
-#define TDM_FRAME_PERIOD_MS    90  // Total period of 1 TDM frame in milliseconds (Approved Bench Baseline)
-#define TDM_GROUND_SLOT_MS     32  // Slot 1: Ground -> Air RC & command slot (0ms - 32ms)
-#define TDM_GUARD_GAP1_MS       5  // Turnaround guard delay 1 (32ms - 37ms)
-#define TDM_AIR_SLOT_MS        45  // Slot 2: Air -> Ground telemetry slot (37ms - 82ms)
-#define TDM_GUARD_GAP2_MS       8  // Turnaround guard delay 2 (82ms - 90ms)
+// --- TDM Protocol Schedule Profiles ---
+// Profile 0: 90.0 ms (11.1 Hz) - Telemetry Heavy (Phase 2 Legacy Baseline)
+// Profile 1: 70.0 ms (14.3 Hz) - Balanced (32ms Ground, 5ms Gap1, 25ms Air, 8ms Gap2)
+// Profile 2: 50.0 ms (20.0 Hz) - RC-Fast Sweet Spot (32ms Ground, 4ms Gap1, 10ms Air, 4ms Gap2)
+#define TDM_PROFILE_90MS_11HZ   0
+#define TDM_PROFILE_70MS_14HZ   1
+#define TDM_PROFILE_50MS_20HZ   2
+
+#ifndef DUAL_LRS_TDM_PROFILE
+#define DUAL_LRS_TDM_PROFILE    TDM_PROFILE_50MS_20HZ
+#endif
+
+#if (DUAL_LRS_TDM_PROFILE == TDM_PROFILE_50MS_20HZ)
+    #define TDM_FRAME_PERIOD_MS    50  // Total period: 50 ms (20.0 Hz fresh RC update rate)
+    #define TDM_GROUND_SLOT_MS     32  // Slot 1: Ground -> Air RC slot (0ms - 32ms, finishes in ~28.5ms)
+    #define TDM_GUARD_GAP1_MS       4  // Turnaround guard delay 1 (32ms - 36ms)
+    #define TDM_AIR_SLOT_MS        10  // Slot 2: Air sync / link quality beacon slot (36ms - 46ms)
+    #define TDM_GUARD_GAP2_MS       4  // Turnaround guard delay 2 (46ms - 50ms)
+#elif (DUAL_LRS_TDM_PROFILE == TDM_PROFILE_70MS_14HZ)
+    #define TDM_FRAME_PERIOD_MS    70  // Total period: 70 ms (14.3 Hz)
+    #define TDM_GROUND_SLOT_MS     32  // Slot 1: Ground -> Air RC slot (0ms - 32ms)
+    #define TDM_GUARD_GAP1_MS       5  // Turnaround guard delay 1 (32ms - 37ms)
+    #define TDM_AIR_SLOT_MS        25  // Slot 2: Air telemetry slot (37ms - 62ms)
+    #define TDM_GUARD_GAP2_MS       8  // Turnaround guard delay 2 (62ms - 70ms)
+#else
+    #define TDM_FRAME_PERIOD_MS    90  // Total period: 90 ms (11.1 Hz)
+    #define TDM_GROUND_SLOT_MS     32  // Slot 1: Ground -> Air RC slot (0ms - 32ms)
+    #define TDM_GUARD_GAP1_MS       5  // Turnaround guard delay 1 (32ms - 37ms)
+    #define TDM_AIR_SLOT_MS        45  // Slot 2: Air telemetry slot (37ms - 82ms)
+    #define TDM_GUARD_GAP2_MS       8  // Turnaround guard delay 2 (82ms - 90ms)
+#endif
 
 // Safety policy: never replace a fresh RC frame with Ground-to-Air MAVLink.
 // MAVLink uplink may use a Ground slot only when no fresh handset frame exists.

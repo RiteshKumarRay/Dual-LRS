@@ -78,6 +78,15 @@ static bool fcBaudLocked = false;
 
 static uint32_t gcsDataPktsRx = 0;
 
+// Diagnostic Timing Telemetry (Microsecond Profiling)
+static uint32_t lastTxStartUs     = 0;
+static uint32_t lastTxAuxUs       = 0;
+static uint32_t maxTxAuxUs        = 0;
+static bool     trackingTxAux     = false;
+static uint32_t dtHandsetUs       = 0;
+static uint32_t lastAirRfRxUs     = 0;
+static uint32_t dtAirRfRxUs       = 0;
+
 void onRadioPacketReceived(LrsPacketType type, const uint8_t* payload, uint8_t length) {
     (void)type;
     (void)payload;
@@ -88,6 +97,12 @@ void onRadioPacketReceived(LrsPacketType type, const uint8_t* payload, uint8_t l
 
 void onTransportFrameReceived(const TransportHeader& hdr, const uint8_t* payload, uint16_t length) {
 #if defined(DUAL_LRS_ROLE_AIR)
+    uint32_t rxNowUs = micros();
+    if (lastAirRfRxUs != 0) {
+        dtAirRfRxUs = rxNowUs - lastAirRfRxUs;
+    }
+    lastAirRfRxUs = rxNowUs;
+
     if (hdr.channel == (uint8_t)TransportChannel::RC_CONTROL) {
         if (length >= sizeof(TransportPackedRc) && payload != nullptr) {
             const TransportPackedRc* packed = reinterpret_cast<const TransportPackedRc*>(payload);
@@ -276,6 +291,18 @@ void loop() {
         rcGroundAdapter.feed_byte(b, now, dtUs);
     }
 
+    static uint32_t lastHandsetFramesIn = 0;
+    static uint32_t lastHandsetFrameUs = 0;
+    uint32_t currentFramesIn = rcGroundAdapter.get_total_valid_frames();
+    if (currentFramesIn != lastHandsetFramesIn) {
+        lastHandsetFramesIn = currentFramesIn;
+        uint32_t hsNowUs = micros();
+        if (lastHandsetFrameUs != 0) {
+            dtHandsetUs = hsNowUs - lastHandsetFrameUs;
+        }
+        lastHandsetFrameUs = hsNowUs;
+    }
+
     // If OpenI6X sent a CRSF Ping frame, reply IMMEDIATELY while PA2 is in receive mode!
     if (rcGroundAdapter.pop_ping_request()) {
         sendCrsfDeviceInfoReply(SCAN_PROFILES[currentScanIdx].baud);
@@ -414,11 +441,6 @@ void loop() {
                         : (slot == TdmSlot::GROUND_TRANSMIT);
 
     static uint32_t gcsMavlinkRfSent = 0;
-
-    static uint32_t lastTxStartUs = 0;
-    static uint32_t lastTxAuxUs = 0;
-    static uint32_t maxTxAuxUs = 0;
-    static bool trackingTxAux = false;
 
     if (trackingTxAux && !radio.isBusy()) {
         lastTxAuxUs = micros() - lastTxStartUs;
@@ -575,13 +597,16 @@ void loop() {
             }
             char wireBuf[65] = {0};
             for (int i = 0; i < 32; i++) sprintf(&wireBuf[i*2], "%02X", rawRing[(rawRingIdx + i) % 32]);
-            Serial.printf("{\"event\":\"RC_GROUND_IN\",\"active\":%s,\"sbus\":%s,\"crsf_ok\":%lu,\"frames\":%lu,\"rf_tx\":%lu,\"crc_err\":%lu,\"wire\":\"%s\",\"hex\":\"%s\",\"ch\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}\n",
+            Serial.printf("{\"event\":\"RC_GROUND_IN\",\"active\":%s,\"sbus\":%s,\"crsf_ok\":%lu,\"frames\":%lu,\"rf_tx\":%lu,\"crc_err\":%lu,\"dt_hs_us\":%lu,\"aux_us\":%lu,\"max_aux\":%lu,\"wire\":\"%s\",\"hex\":\"%s\",\"ch\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}\n",
                 active ? "true" : "false",
                 rcGroundAdapter.is_using_sbus() ? "true" : "false",
                 (unsigned long)rcGroundAdapter.get_crsf_valid_frames(),
                 (unsigned long)rcStats.crsf_frames_in,
                 (unsigned long)rcStats.rf_frames_sent,
                 (unsigned long)rcStats.crsf_crc_errors,
+                (unsigned long)dtHandsetUs,
+                (unsigned long)lastTxAuxUs,
+                (unsigned long)maxTxAuxUs,
                 wireBuf,
                 hexBuf,
                 ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
@@ -607,10 +632,11 @@ void loop() {
     if (Serial && (now - lastAirRcLogMs >= 50)) {
         lastAirRcLogMs = now;
         const uint16_t* ch = rcAirAdapter.get_channels();
-        char jsonBuf[220];
+        char jsonBuf[260];
         int n = snprintf(jsonBuf, sizeof(jsonBuf),
-            "{\"event\":\"RC_AIR_RX\",\"rf_rx\":%lu,\"failsafe\":%s,\"fs_events\":%lu,\"ch\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}\n",
+            "{\"event\":\"RC_AIR_RX\",\"rf_rx\":%lu,\"dt_rf_us\":%lu,\"failsafe\":%s,\"fs_events\":%lu,\"ch\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}\n",
             (unsigned long)rcAirAdapter.get_stats().rf_frames_received,
+            (unsigned long)dtAirRfRxUs,
             rcAirAdapter.is_failsafe_active() ? "true" : "false",
             (unsigned long)rcAirAdapter.get_stats().failsafe_events,
             ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],

@@ -219,7 +219,8 @@ void TdmEngine::processIncomingRadioData() {
             if (_role == NodeRole::AIR) {
                 // Ground slot starts at t=0.0ms. Transfer time: ~10ms (0B sync) to ~28.5ms (39B RC)
                 uint32_t expectedArrivalUs = (plen == 0) ? 10200 : (10200 + plen * 500);
-                if (expectedArrivalUs > 32000) expectedArrivalUs = 32000;
+                uint32_t maxGroundArrivalUs = TDM_GROUND_SLOT_MS * 1000;
+                if (expectedArrivalUs > maxGroundArrivalUs) expectedArrivalUs = maxGroundArrivalUs;
                 uint32_t nowUs = micros();
                 if (nowUs >= expectedArrivalUs) {
                     uint32_t targetStartUs = nowUs - expectedArrivalUs;
@@ -228,8 +229,10 @@ void TdmEngine::processIncomingRadioData() {
                     } else {
                         // Graduated PLL slew for crystal drift compensation
                         int32_t err = (int32_t)(targetStartUs - _frameStartTimeUs);
-                        while (err > 45000) err -= 90000;
-                        while (err < -45000) err += 90000;
+                        int32_t periodUs = (int32_t)(TDM_FRAME_PERIOD_MS * 1000);
+                        int32_t halfPeriodUs = periodUs / 2;
+                        while (err > halfPeriodUs) err -= periodUs;
+                        while (err < -halfPeriodUs) err += periodUs;
                         _stats.last_arrival_us = (uint32_t)(nowUs - _frameStartTimeUs);
                         _stats.last_pll_err = err;
                         int32_t absErr = (err < 0) ? -err : err;
