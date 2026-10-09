@@ -21,10 +21,13 @@
     #define SerialRadio Serial1
     #define SerialTELEM Serial2
     const NodeRole CURRENT_ROLE = NodeRole::AIR;
-    // Air unit interfaces with Flight Controller via Hardware Serial (USART2)
-    MavlinkHandler telemHandler(SerialTELEM);
-    // Air unit CRSF output to FC RC_IN via Hardware USART6 (PA12 RX / PA11 TX)
-    Uart SerialAirCRSF(PIN_AIR_CRSF_RX, PIN_AIR_CRSF_TX);
+    #if defined(USBCON)
+        #define SerialAirCRSF Serial2
+        MavlinkHandler telemHandler(Serial);
+    #else
+        MavlinkHandler telemHandler(SerialTELEM);
+        Uart SerialAirCRSF(PIN_AIR_CRSF_RX, PIN_AIR_CRSF_TX);
+    #endif
     static RcAirAdapter rcAirAdapter;
 #else
     #define SerialRadio Serial1
@@ -628,6 +631,26 @@ void loop() {
     }
 
     #if defined(DUAL_LRS_ROLE_AIR) && defined(USBCON)
+    // USB command handler: ESC (0x1B) resets the BlackPill into DFU bootloader mode
+    if (Serial) {
+        while (Serial.available() > 0) {
+            uint8_t b = (uint8_t)Serial.read();
+            if (b == 0x1B) {
+                HAL_RCC_DeInit();
+                HAL_DeInit();
+                SysTick->CTRL = 0;
+                SysTick->LOAD = 0;
+                SysTick->VAL = 0;
+                __disable_irq();
+                uint32_t appStack = *(__IO uint32_t*)0x1FFF0000;
+                void (*SysMemBootJump)(void) = (void (*)(void))(*(__IO uint32_t*)(0x1FFF0000 + 4));
+                __set_MSP(appStack);
+                SysMemBootJump();
+                while (1);
+            }
+        }
+    }
+
     static uint32_t lastAirRcLogMs = 0;
     if (Serial && (now - lastAirRcLogMs >= 50)) {
         lastAirRcLogMs = now;
