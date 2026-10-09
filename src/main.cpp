@@ -346,10 +346,12 @@ void loop() {
         uint32_t validNow = rcGroundAdapter.get_total_valid_frames();
         if (validNow >= 10 && (validNow - lastValidCheckCount >= 5)) {
             rcHandsetLocked = true;
+            #if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
             Serial.printf("{\"event\":\"HANDSET_LOCKED\",\"baud\":%lu,\"invert\":%s,\"desc\":\"%s\"}\n",
                 (unsigned long)p.baud,
                 p.invert ? "true" : "false",
                 p.desc);
+            #endif
         } else if (now - lastScanSwitchMs >= 3000 && (lastByteUs == 0 || (micros() - lastByteUs > 1000000))) {
             lastScanSwitchMs = now;
             currentScanIdx = (currentScanIdx + 1) % (sizeof(SCAN_PROFILES) / sizeof(SCAN_PROFILES[0]));
@@ -360,11 +362,13 @@ void loop() {
             rcGroundAdapter.reset_protocol();
             lastValidCheckCount = rcGroundAdapter.get_total_valid_frames();
             const RcScanProfile& np = SCAN_PROFILES[currentScanIdx];
+            #if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
             Serial.printf("{\"event\":\"SCAN_TRY\",\"idx\":%u,\"baud\":%lu,\"invert\":%s,\"desc\":\"%s\"}\n",
                 currentScanIdx,
                 (unsigned long)np.baud,
                 np.invert ? "true" : "false",
                 np.desc);
+            #endif
         }
     }
 #elif defined(DUAL_LRS_ROLE_AIR)
@@ -492,13 +496,16 @@ void loop() {
                 bool send_rc = has_rc;
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
                 bool has_uplink_mavlink = groundUplinkFragmenter.has_next_fragment() || telemHandler.hasOutboundData();
-#if (DUAL_LRS_RESERVE_RC_EVERY_CYCLE == 0)
-                // Development-only opt-out for measured scheduler experiments.
-                // This must not be used for flight firmware.
-                if (has_rc && has_uplink_mavlink) {
+                static uint8_t slotsSinceRc = 0;
+                // Priority interleaving: When RC and GCS uplink are both active,
+                // allow 1 GCS command slot every 4 cycles (slotsSinceRc >= 3) to prevent RC starvation
+                if (has_rc && has_uplink_mavlink && slotsSinceRc >= 3) {
                     send_rc = false;
+                    slotsSinceRc = 0;
+                } else if (has_rc) {
+                    send_rc = true;
+                    slotsSinceRc++;
                 }
-#endif
                 if (!send_rc && has_uplink_mavlink) {
                     if (!groundUplinkFragmenter.has_next_fragment()) {
                         size_t pkt_len = telemHandler.getOutboundPacket(groundTxMsgBuf, sizeof(groundTxMsgBuf));
@@ -609,8 +616,8 @@ void loop() {
     #endif
     #endif
 
-    #if defined(ESP32)
-    // Ground USB Live Monitor: emits 10 Hz status for live visualization / calibration
+    #if defined(ESP32) && defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
+    // Ground USB Live Monitor: emits 10 Hz status for live visualization / calibration (RC-only mode only)
     static uint32_t lastGroundLogMs = 0;
     if (Serial && (now - lastGroundLogMs >= 100)) {
         lastGroundLogMs = now;

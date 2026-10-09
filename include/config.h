@@ -68,12 +68,12 @@
 #define LED_PIN_OFF        HIGH
 #endif
 
-// --- Stage 3.1 RC-Only Isolation Mode ---
-// When enabled (1), completely disables production MAVLink RF traffic and FC stream requests.
-// Air and Ground nodes only exchange pure Phase 2 RC frames and LINK_CONTROL sync frames over RF.
-// Local FC parsing remains intact, but no MAVLink bytes are transmitted over the air.
+// --- Stage 3.2 Full MAVLink Telemetry Mode ---
+// When enabled (0), enables bidirectional MAVLink RF telemetry between FC and GCS.
+// Air requests streams from ArduPilot, fragments packets into 49B frames, and streams down to Ground.
+// Ground reconstructs packets and outputs to Mission Planner / QGC over USB CDC / UART.
 #ifndef DUAL_LRS_STAGE31_RC_ONLY
-#define DUAL_LRS_STAGE31_RC_ONLY  1
+#define DUAL_LRS_STAGE31_RC_ONLY  0
 #endif
 
 // --- Flight Controller Telemetry UART (PA2/PA3 strictly reserved) ---
@@ -119,7 +119,7 @@
 #define TDM_PROFILE_50MS_20HZ   2
 
 #ifndef DUAL_LRS_TDM_PROFILE
-#define DUAL_LRS_TDM_PROFILE    TDM_PROFILE_50MS_20HZ
+#define DUAL_LRS_TDM_PROFILE    TDM_PROFILE_70MS_14HZ
 #endif
 
 #if (DUAL_LRS_TDM_PROFILE == TDM_PROFILE_50MS_20HZ)
