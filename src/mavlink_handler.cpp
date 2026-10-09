@@ -192,6 +192,7 @@ void MavlinkHandler::begin() {
     _airUplinkCount = 0;
     _airUplinkInProgress = false;
     _lastUplinkChunkMs = 0;
+    _paramDownloadActive = false;
 }
 
 bool MavlinkHandler::pushByte(uint8_t b) {
@@ -227,6 +228,13 @@ void MavlinkHandler::readFromLocal() {
     if (now - _lastLocalByteMs > 50 && _rxState != RxState::IDLE) {
         _rxState = RxState::IDLE;
         _rxIndex = 0;
+    }
+
+    // Auto-clear parameter download active state when:
+    // 1) At least 2.5 seconds have elapsed since the last PARAM_VALUE was received from FC, AND
+    // 2) The outbound FIFO queue has completely drained (under 100 bytes).
+    if (_paramDownloadActive && (now - _lastParamRxMs > 2500) && (_txQueue.available() < 100)) {
+        _paramDownloadActive = false;
     }
 
     // Allow draining up to 512 bytes per call to match the hardware SERIAL_RX_BUFFER_SIZE.
@@ -332,6 +340,7 @@ void MavlinkHandler::parseByte(uint8_t c) {
             } else if (msgid == 22) {
                     _validParamValues++;
                     _lastParamRxMs = millis();
+                    _paramDownloadActive = true;
                 }
 
                 bool drop = false;
@@ -349,30 +358,34 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (isCriticalMavlinkMessage(msgid)) {
                     drop = false; // Critical (params, heartbeat, mission, commands): always pass
                 } else if (isEssentialTelem) {
-                    // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
-                    uint32_t* lastMs = nullptr;
-                    uint32_t minIntervalMs = 1000;
-                    if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
-                    else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
-                    else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
-                    else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
-                    else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
-                    else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
-
-                    if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
-                        *lastMs = millis();
-                        drop = false;
+                    // During parameter download, mute all streaming telemetry so 100% of RF slots carry parameters!
+                    if (_paramDownloadActive) {
+                        drop = true;
                     } else {
-                        drop = true; // Rate-limited: not yet
+                        // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
+                        uint32_t* lastMs = nullptr;
+                        uint32_t minIntervalMs = 1000;
+                        if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
+                        else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
+                        else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
+
+                        if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
+                            *lastMs = millis();
+                            drop = false;
+                        } else {
+                            drop = true; // Rate-limited: not yet
+                        }
                     }
                 } else if (_rxExpectedLen > MAX_PAYLOAD_AIR_SLOT) {
                     drop = true; // Non-critical packets exceeding slot size should never fragment
                 } else {
                     // Non-critical streaming telemetry (RC channels, raw IMU, etc.):
                     // Drop during param download or when queue has backlog
-                    bool paramActive = (millis() - _lastParamRxMs < 2500);
                     bool queueBacklog = (_txQueue.available() > 200);
-                    if (paramActive || queueBacklog) {
+                    if (_paramDownloadActive || queueBacklog) {
                         drop = true;
                     }
                 }
@@ -519,6 +532,7 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (msgid == 22) {
                     _validParamValues++;
                     _lastParamRxMs = millis();
+                    _paramDownloadActive = true;
                 }
 
                 bool drop = false;
@@ -536,30 +550,34 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (isCriticalMavlinkMessage(msgid)) {
                     drop = false; // Critical (params, heartbeat, mission, commands): always pass
                 } else if (isEssentialTelem) {
-                    // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
-                    uint32_t* lastMs = nullptr;
-                    uint32_t minIntervalMs = 1000;
-                    if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
-                    else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
-                    else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
-                    else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
-                    else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
-                    else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
-
-                    if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
-                        *lastMs = millis();
-                        drop = false;
+                    // During parameter download, mute all streaming telemetry so 100% of RF slots carry parameters!
+                    if (_paramDownloadActive) {
+                        drop = true;
                     } else {
-                        drop = true; // Rate-limited: not yet
+                        // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
+                        uint32_t* lastMs = nullptr;
+                        uint32_t minIntervalMs = 1000;
+                        if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
+                        else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
+                        else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
+
+                        if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
+                            *lastMs = millis();
+                            drop = false;
+                        } else {
+                            drop = true; // Rate-limited: not yet
+                        }
                     }
                 } else if (_rxExpectedLen > MAX_PAYLOAD_AIR_SLOT) {
                     drop = true; // Non-critical packets exceeding slot size should never fragment
                 } else {
                     // Non-critical streaming telemetry (RC channels, raw IMU, etc.):
                     // Drop during param download or when queue has backlog
-                    bool paramActive = (millis() - _lastParamRxMs < 2500);
                     bool queueBacklog = (_txQueue.available() > 200);
-                    if (paramActive || queueBacklog) {
+                    if (_paramDownloadActive || queueBacklog) {
                         drop = true;
                     }
                 }
@@ -956,6 +974,18 @@ void MavlinkHandler::writeToLocal(const uint8_t* src, size_t length) {
                     _airUplinkInProgress = false;
                 }
                 break;
+        }
+    }
+
+    // Detect GCS parameter table request (msgid 21) or parameter read (msgid 20)
+    if (length >= 8) {
+        if (src[0] == 0xFE && length >= 8 && (src[5] == 21 || src[5] == 20)) {
+            notifyParamRequest();
+        } else if (src[0] == 0xFD && length >= 12) {
+            uint32_t upMsgId = src[7] | ((uint32_t)src[8] << 8) | ((uint32_t)src[9] << 16);
+            if (upMsgId == 21 || upMsgId == 20) {
+                notifyParamRequest();
+            }
         }
     }
 

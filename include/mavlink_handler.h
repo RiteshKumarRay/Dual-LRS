@@ -74,6 +74,12 @@ public:
     uint32_t validHeartbeats() const { return _validHeartbeats; }
     uint32_t lastHeartbeatMs() const { return _lastHeartbeatMs; }
     uint32_t validParamValues() const { return _validParamValues; }
+    uint32_t lastParamRxMs() const { return _lastParamRxMs; }
+    bool isParamDownloadActive() const { return _paramDownloadActive; }
+    void notifyParamRequest() {
+        _paramDownloadActive = true;
+        _lastParamRxMs = millis();
+    }
     uint32_t rawBytesRead() const { return _rawBytesRead; }
 
 private:
@@ -84,6 +90,7 @@ private:
     uint32_t _lastHeartbeatMs = 0;
     uint32_t _validParamValues = 0;
     uint32_t _lastParamRxMs = 0;
+    bool     _paramDownloadActive = false;
     uint32_t _lastLocalByteMs = 0;
     uint32_t _lastSysStatusMs = 0;   // SYS_STATUS  (msgid 1)   — battery
     uint32_t _lastGpsMs = 0;         // GPS_RAW_INT (msgid 24)  — GPS fix & satellites
