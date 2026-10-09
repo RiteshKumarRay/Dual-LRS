@@ -193,6 +193,9 @@ void MavlinkHandler::begin() {
     _airUplinkInProgress = false;
     _lastUplinkChunkMs = 0;
     _paramDownloadActive = false;
+    _attitudePending = false;
+    _attitudeLen = 0;
+    _lastAttitudeTxMs = 0;
 }
 
 bool MavlinkHandler::pushByte(uint8_t b) {
@@ -235,6 +238,7 @@ void MavlinkHandler::readFromLocal() {
     // 2) The outbound FIFO queue has completely drained (under 100 bytes).
     if (_paramDownloadActive && (now - _lastParamRxMs > 2500) && (_txQueue.available() < 100)) {
         _paramDownloadActive = false;
+        _txQueue.clear(); // Flush residual scraps so fresh telemetry starts with 0 backlog!
     }
 
     // Allow draining up to 512 bytes per call to match the hardware SERIAL_RX_BUFFER_SIZE.
@@ -337,6 +341,16 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     _rxIndex = 0;
                     return;
                 }
+            } else if (msgid == 30) {
+                // Air: Fast-Path Attitude mailbox (overwrites with latest orientation; zero FIFO lag)
+                if (_rxExpectedLen <= sizeof(_attitudeCache)) {
+                    memcpy(_attitudeCache, _rxBuffer, _rxExpectedLen);
+                    _attitudeLen = (uint8_t)_rxExpectedLen;
+                    _attitudePending = true;
+                    _rxState = RxState::IDLE;
+                    _rxIndex = 0;
+                    return;
+                }
             } else if (msgid == 22) {
                     _validParamValues++;
                     _lastParamRxMs = millis();
@@ -349,7 +363,6 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 bool isEssentialTelem = (msgid == 1   ||  // SYS_STATUS (battery)
                                          msgid == 24  ||  // GPS_RAW_INT (sats)
                                          msgid == 33  ||  // GLOBAL_POSITION_INT (lat/lon/alt)
-                                         msgid == 30  ||  // ATTITUDE
                                          msgid == 74  ||  // VFR_HUD
                                          msgid == 147);   // BATTERY_STATUS
 
@@ -362,12 +375,11 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     if (_paramDownloadActive) {
                         drop = true;
                     } else {
-                        // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
+                        // Allow essential HUD telemetry: GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
                         uint32_t* lastMs = nullptr;
                         uint32_t minIntervalMs = 1000;
-                        if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
-                        else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
-                        else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
+                        if      (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 1000; } // 1 Hz
                         else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
                         else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
                         else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
@@ -382,12 +394,9 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (_rxExpectedLen > MAX_PAYLOAD_AIR_SLOT) {
                     drop = true; // Non-critical packets exceeding slot size should never fragment
                 } else {
-                    // Non-critical streaming telemetry (RC channels, raw IMU, etc.):
-                    // Drop during param download or when queue has backlog
-                    bool queueBacklog = (_txQueue.available() > 200);
-                    if (_paramDownloadActive || queueBacklog) {
-                        drop = true;
-                    }
+                    // Drop all other streaming telemetry (RAW_IMU, SCALED_PRESSURE, AHRS, HWSTATUS, RC_CHANNELS, etc.)
+                    // to permanently eliminate FIFO bufferbloat!
+                    drop = true;
                 }
 
                 if (!drop) {
@@ -529,6 +538,16 @@ void MavlinkHandler::parseByte(uint8_t c) {
                         _rxIndex = 0;
                         return;
                     }
+                } else if (msgid == 30) {
+                    // Air: Fast-Path Attitude mailbox (overwrites with latest orientation; zero FIFO lag)
+                    if (_rxExpectedLen <= sizeof(_attitudeCache)) {
+                        memcpy(_attitudeCache, _rxBuffer, _rxExpectedLen);
+                        _attitudeLen = (uint8_t)_rxExpectedLen;
+                        _attitudePending = true;
+                        _rxState = RxState::IDLE;
+                        _rxIndex = 0;
+                        return;
+                    }
                 } else if (msgid == 22) {
                     _validParamValues++;
                     _lastParamRxMs = millis();
@@ -541,7 +560,6 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 bool isEssentialTelem = (msgid == 1   ||  // SYS_STATUS (battery)
                                          msgid == 24  ||  // GPS_RAW_INT (sats)
                                          msgid == 33  ||  // GLOBAL_POSITION_INT (lat/lon/alt)
-                                         msgid == 30  ||  // ATTITUDE
                                          msgid == 74  ||  // VFR_HUD
                                          msgid == 147);   // BATTERY_STATUS
 
@@ -554,12 +572,11 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     if (_paramDownloadActive) {
                         drop = true;
                     } else {
-                        // Allow essential HUD telemetry: ATTITUDE @ 4Hz (250ms), GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
+                        // Allow essential HUD telemetry: GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
                         uint32_t* lastMs = nullptr;
                         uint32_t minIntervalMs = 1000;
-                        if      (msgid == 30)  { lastMs = &_lastAttitudeMs;      minIntervalMs = 250; }  // 4 Hz (smooth tilt)
-                        else if (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
-                        else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 500; }  // 2 Hz
+                        if      (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
+                        else if (msgid == 24)  { lastMs = &_lastGpsMs;           minIntervalMs = 1000; } // 1 Hz
                         else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
                         else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
                         else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
@@ -574,12 +591,9 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (_rxExpectedLen > MAX_PAYLOAD_AIR_SLOT) {
                     drop = true; // Non-critical packets exceeding slot size should never fragment
                 } else {
-                    // Non-critical streaming telemetry (RC channels, raw IMU, etc.):
-                    // Drop during param download or when queue has backlog
-                    bool queueBacklog = (_txQueue.available() > 200);
-                    if (_paramDownloadActive || queueBacklog) {
-                        drop = true;
-                    }
+                    // Drop all other streaming telemetry (RAW_IMU, SCALED_PRESSURE, AHRS, HWSTATUS, RC_CHANNELS, etc.)
+                    // to permanently eliminate FIFO bufferbloat!
+                    drop = true;
                 }
 
                 if (!drop) {
@@ -745,6 +759,21 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
         return toSend;
     }
 
+    // 7. Fast-path Attitude bypass (bypasses FIFO queue to deliver real-time orientation, paced at 4-5 Hz)
+    if (!_paramDownloadActive && _attitudePending && _attitudeLen > 0 && (millis() - _lastAttitudeTxMs >= 200)) {
+        size_t toSend = (_attitudeLen < maxLen) ? _attitudeLen : maxLen;
+        memcpy(dest, _attitudeCache, toSend);
+        if (toSend < _attitudeLen) {
+            memmove(_attitudeCache, _attitudeCache + toSend, _attitudeLen - toSend);
+            _attitudeLen -= (uint8_t)toSend;
+        } else {
+            _attitudePending = false;
+            _attitudeLen = 0;
+            _lastAttitudeTxMs = millis();
+        }
+        return toSend;
+    }
+
     size_t packedBytes = 0;
 
     avail = _txQueue.available();
@@ -816,7 +845,9 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
 }
 
 bool MavlinkHandler::hasOutboundData() const {
-    return _missionPending || _urgentPending || _hbPending || (_txQueue.available() > 0) || (_fragmentRemaining > 0);
+    return _missionPending || _urgentPending || _hbPending ||
+           (!_paramDownloadActive && _attitudePending && (millis() - _lastAttitudeTxMs >= 200)) ||
+           (_txQueue.available() > 0) || (_fragmentRemaining > 0);
 }
 
 size_t MavlinkHandler::getOutboundPacket(uint8_t* dest, size_t maxPacketLen) {
@@ -857,7 +888,19 @@ size_t MavlinkHandler::getOutboundPacket(uint8_t* dest, size_t maxPacketLen) {
         }
     }
 
-    // 4. Complete MAVLink packet from _txQueue
+    // 4. Fast-path Attitude mailbox (bypasses FIFO queue to deliver real-time orientation, paced at 4-5 Hz)
+    if (!_paramDownloadActive && _attitudePending && _attitudeLen > 0 && (millis() - _lastAttitudeTxMs >= 200)) {
+        if (_attitudeLen <= maxPacketLen) {
+            memcpy(dest, _attitudeCache, _attitudeLen);
+            size_t len = _attitudeLen;
+            _attitudePending = false;
+            _attitudeLen = 0;
+            _lastAttitudeTxMs = millis();
+            return len;
+        }
+    }
+
+    // 5. Complete MAVLink packet from _txQueue
     size_t avail = _txQueue.available();
     while (avail > 0) {
         int magic = _txQueue.peek(0);

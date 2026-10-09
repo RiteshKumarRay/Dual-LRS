@@ -142,6 +142,12 @@ private:
     uint8_t  _hbLen = 0;
     bool     _hbPending = false;
 
+    // Fast-path Attitude mailbox (bypasses FIFO queue to eliminate HUD/magnetometer lag)
+    uint8_t  _attitudeCache[48];
+    uint8_t  _attitudeLen = 0;
+    bool     _attitudePending = false;
+    uint32_t _lastAttitudeTxMs = 0;
+
     // Dedicated Mission Cache: isolates mission protocol handshakes (MISSION_COUNT,
     // MISSION_REQUEST, MISSION_ITEM, MISSION_ACK) from STATUSTEXT and FIFO telemetry.
     uint8_t  _missionCache[64];
