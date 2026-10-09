@@ -318,17 +318,19 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 }
             } else if (isMissionMavlinkMessage(msgid)) {
                 // Air: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                // Always overwrite with the newest mission packet — no 400ms lockout.
+                // getOutboundPacket() does an atomic copy-and-clear so overwriting is safe.
+                // The old lockout caused FC's MISSION_ITEM_INT response to be silently dropped
+                // when _missionPending was still true from the preceding MISSION_COUNT ingest.
                 if (_rxExpectedLen <= sizeof(_missionCache)) {
-                    if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
-                        memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
-                        _missionLen = (uint8_t)_rxExpectedLen;
-                        _missionPending = true;
-                        _missionSending = false;
-                        _lastMissionIngestMs = millis();
-                        _rxState = RxState::IDLE;
-                        _rxIndex = 0;
-                        return;
-                    }
+                    memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                    _missionLen = (uint8_t)_rxExpectedLen;
+                    _missionPending = true;
+                    _missionSending = false;
+                    _lastMissionIngestMs = millis();
+                    _rxState = RxState::IDLE;
+                    _rxIndex = 0;
+                    return;
                 }
             } else if (msgid == 253 || msgid == 77) {
                 // Air: High-priority urgent response bypass (STATUSTEXT, COMMAND_ACK jump to front)
@@ -422,17 +424,16 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     return;
                 } else if (isMissionMavlinkMessage(msgid)) {
                     // Ground: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                    // Always overwrite with the newest mission command — no 400ms lockout.
                     if (_rxExpectedLen <= sizeof(_missionCache)) {
-                        if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
-                            memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
-                            _missionLen = (uint8_t)_rxExpectedLen;
-                            _missionPending = true;
-                            _missionSending = false;
-                            _lastMissionIngestMs = millis();
-                            _rxState = RxState::IDLE;
-                            _rxIndex = 0;
-                            return;
-                        }
+                        memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                        _missionLen = (uint8_t)_rxExpectedLen;
+                        _missionPending = true;
+                        _missionSending = false;
+                        _lastMissionIngestMs = millis();
+                        _rxState = RxState::IDLE;
+                        _rxIndex = 0;
+                        return;
                     }
                 } else if (msgid == 23 || msgid == 76) {
                     // Ground: High-priority urgent uplink bypass (PARAM_SET, COMMAND_LONG jump to front)
@@ -515,17 +516,17 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     }
                 } else if (isMissionMavlinkMessage(msgid)) {
                     // Air: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                    // Always overwrite with the newest mission packet — no 400ms lockout.
+                    // getOutboundPacket() does an atomic copy-and-clear so overwriting is safe.
                     if (_rxExpectedLen <= sizeof(_missionCache)) {
-                        if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
-                            memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
-                            _missionLen = (uint8_t)_rxExpectedLen;
-                            _missionPending = true;
-                            _missionSending = false;
-                            _lastMissionIngestMs = millis();
-                            _rxState = RxState::IDLE;
-                            _rxIndex = 0;
-                            return;
-                        }
+                        memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                        _missionLen = (uint8_t)_rxExpectedLen;
+                        _missionPending = true;
+                        _missionSending = false;
+                        _lastMissionIngestMs = millis();
+                        _rxState = RxState::IDLE;
+                        _rxIndex = 0;
+                        return;
                     }
                 } else if (msgid == 253 || msgid == 77) {
                     // Air: High-priority urgent response bypass (STATUSTEXT, COMMAND_ACK jump to front)
@@ -619,17 +620,18 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     return;
                 } else if (isMissionMavlinkMessage(msgid)) {
                     // Ground: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
+                    // Always overwrite with the newest mission command — no 400ms lockout.
+                    // GCS sends MISSION_REQUEST_LIST followed quickly by MISSION_REQUEST_INT;
+                    // the old lockout silently dropped the 2nd command before it reached Air over RF.
                     if (_rxExpectedLen <= sizeof(_missionCache)) {
-                        if (!_missionPending || (millis() - _lastMissionIngestMs > 400)) {
-                            memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
-                            _missionLen = (uint8_t)_rxExpectedLen;
-                            _missionPending = true;
-                            _missionSending = false;
-                            _lastMissionIngestMs = millis();
-                            _rxState = RxState::IDLE;
-                            _rxIndex = 0;
-                            return;
-                        }
+                        memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
+                        _missionLen = (uint8_t)_rxExpectedLen;
+                        _missionPending = true;
+                        _missionSending = false;
+                        _lastMissionIngestMs = millis();
+                        _rxState = RxState::IDLE;
+                        _rxIndex = 0;
+                        return;
                     }
                 } else if (msgid == 23 || msgid == 76) {
                     // Ground: High-priority urgent uplink bypass (PARAM_SET, COMMAND_LONG jump to front)
