@@ -21,13 +21,9 @@
     #define SerialRadio Serial1
     #define SerialTELEM Serial2
     const NodeRole CURRENT_ROLE = NodeRole::AIR;
-    #if defined(USBCON)
-        #define SerialAirCRSF Serial2
-        MavlinkHandler telemHandler(SerialTELEM);
-    #else
-        MavlinkHandler telemHandler(SerialTELEM);
-        Uart SerialAirCRSF(PIN_AIR_CRSF_RX, PIN_AIR_CRSF_TX);
-    #endif
+    MavlinkHandler telemHandler(SerialTELEM);
+    // Air unit CRSF output to Flight Controller RC_IN via Hardware USART6 (PA11 TX / PA12 RX @ 420,000 baud)
+    Uart SerialAirCRSF(PIN_AIR_CRSF_RX, PIN_AIR_CRSF_TX);
     static RcAirAdapter rcAirAdapter;
 #else
     #define SerialRadio Serial1
@@ -269,9 +265,7 @@ void setup() {
 
     #if defined(SerialTELEM)
         #if defined(DUAL_LRS_ROLE_AIR)
-            #if !defined(USBCON)
             SerialTELEM.begin(currentFcBaud);
-            #endif
         #else
             SerialTELEM.begin(FC_UART_BAUD);
         #endif
