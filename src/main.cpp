@@ -23,7 +23,7 @@
     const NodeRole CURRENT_ROLE = NodeRole::AIR;
     #if defined(USBCON)
         #define SerialAirCRSF Serial2
-        MavlinkHandler telemHandler(Serial);
+        MavlinkHandler telemHandler(SerialTELEM);
     #else
         MavlinkHandler telemHandler(SerialTELEM);
         Uart SerialAirCRSF(PIN_AIR_CRSF_RX, PIN_AIR_CRSF_TX);
@@ -102,7 +102,10 @@ void onTransportFrameReceived(const TransportHeader& hdr, const uint8_t* payload
 #if defined(DUAL_LRS_ROLE_AIR)
     uint32_t rxNowUs = micros();
     if (lastAirRfRxUs != 0) {
-        dtAirRfRxUs = rxNowUs - lastAirRfRxUs;
+        uint32_t dt = rxNowUs - lastAirRfRxUs;
+        if (dt >= 5000) {  // Only record true over-the-air arrival intervals (>= 5ms)
+            dtAirRfRxUs = dt;
+        }
     }
     lastAirRfRxUs = rxNowUs;
 
@@ -110,6 +113,24 @@ void onTransportFrameReceived(const TransportHeader& hdr, const uint8_t* payload
         if (length >= sizeof(TransportPackedRc) && payload != nullptr) {
             const TransportPackedRc* packed = reinterpret_cast<const TransportPackedRc*>(payload);
             rcAirAdapter.ingest_rc_frame(*packed, millis());
+
+            #if defined(USBCON)
+            if (Serial) {
+                const uint16_t* ch = rcAirAdapter.get_channels();
+                char jsonBuf[260];
+                int n = snprintf(jsonBuf, sizeof(jsonBuf),
+                    "{\"event\":\"RC_AIR_RX\",\"rf_rx\":%lu,\"dt_rf_us\":%lu,\"failsafe\":%s,\"fs_events\":%lu,\"ch\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}\n",
+                    (unsigned long)rcAirAdapter.get_stats().rf_frames_received,
+                    (unsigned long)dtAirRfRxUs,
+                    rcAirAdapter.is_failsafe_active() ? "true" : "false",
+                    (unsigned long)rcAirAdapter.get_stats().failsafe_events,
+                    ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
+                    ch[8], ch[9], ch[10], ch[11], ch[12], ch[13], ch[14], ch[15]);
+                if (n > 0) {
+                    Serial.write((const uint8_t*)jsonBuf, (size_t)n);
+                }
+            }
+            #endif
         }
     }
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
@@ -248,7 +269,9 @@ void setup() {
 
     #if defined(SerialTELEM)
         #if defined(DUAL_LRS_ROLE_AIR)
+            #if !defined(USBCON)
             SerialTELEM.begin(currentFcBaud);
+            #endif
         #else
             SerialTELEM.begin(FC_UART_BAUD);
         #endif
@@ -306,8 +329,9 @@ void loop() {
         lastHandsetFrameUs = hsNowUs;
     }
 
-    // If OpenI6X sent a CRSF Ping frame, reply IMMEDIATELY while PA2 is in receive mode!
-    if (rcGroundAdapter.pop_ping_request()) {
+    // If OpenI6X sent a CRSF Ping frame, reply while PA2 is in receive mode (rate-limited once locked to prevent UART bounce)
+    if (rcGroundAdapter.pop_ping_request() && (!rcHandsetLocked || (now - lastPingReplyMs >= 2000))) {
+        lastPingReplyMs = now;
         sendCrsfDeviceInfoReply(SCAN_PROFILES[currentScanIdx].baud);
     }
 
@@ -409,8 +433,8 @@ void loop() {
     #endif
 
     // Auto-Baud scanner for Flight Controller UART:
-    // Locks when valid Heartbeat packets arrive from ArduPilot.
-    // Once locked, it stays permanently locked to prevent comms blackouts during active operations.
+    // Only runs when full MAVLink telemetry is enabled and USB CDC is not monopolizing USART2
+    #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0)) && !defined(USBCON)
     static bool fcBaudPermanentlyLocked = false;
     if (!fcBaudPermanentlyLocked) {
         if (telemHandler.validHeartbeats() > 0 && (now - telemHandler.lastHeartbeatMs() < 5000)) {
@@ -428,6 +452,7 @@ void loop() {
             }
         }
     }
+    #endif
     #endif
 
     // 2. Update TDM state machine and process incoming radio frames
@@ -651,9 +676,9 @@ void loop() {
         }
     }
 
-    static uint32_t lastAirRcLogMs = 0;
-    if (Serial && (now - lastAirRcLogMs >= 50)) {
-        lastAirRcLogMs = now;
+    static uint32_t lastAirFailsafeLogMs = 0;
+    if (Serial && rcAirAdapter.is_failsafe_active() && (now - lastAirFailsafeLogMs >= 200)) {
+        lastAirFailsafeLogMs = now;
         const uint16_t* ch = rcAirAdapter.get_channels();
         char jsonBuf[260];
         int n = snprintf(jsonBuf, sizeof(jsonBuf),
@@ -669,6 +694,7 @@ void loop() {
         }
     }
 
+    #if 0
     static uint32_t lastAirDiagMs = 0;
     if (Serial && (now - lastAirDiagMs >= 1000)) {
         lastAirDiagMs = now;
@@ -693,5 +719,6 @@ void loop() {
             SerialTELEM.available()
         );
     }
+    #endif
     #endif
 }

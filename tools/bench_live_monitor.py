@@ -85,12 +85,14 @@ def main():
                     while ground_ser.in_waiting > 0:
                         l = ground_ser.readline().decode('utf-8', errors='ignore').strip()
                         if 'ULTRA_RC_GROUND' in l or 'PURE_RC_GROUND' in l or 'RC_GROUND_IN' in l:
-                            d = json.loads(l)
-                            ground_channels = d.get('ch', ground_channels)
-                            ground_tx_count = d.get('rf_tx', ground_tx_count)
-                            last_ground_time = t_now
-                            g_pkts_sec += 1
-                except:
+                            try:
+                                d = json.loads(l)
+                                ground_channels = d.get('ch', ground_channels)
+                                ground_tx_count = d.get('rf_tx', ground_tx_count)
+                                last_ground_time = t_now
+                                g_pkts_sec += 1
+                            except: pass
+                except (serial.SerialException, OSError):
                     ground_ser = None
 
             # Read Air
@@ -99,13 +101,17 @@ def main():
                     while air_ser.in_waiting > 0:
                         l = air_ser.readline().decode('utf-8', errors='ignore').strip()
                         if 'ULTRA_RC_AIR' in l or 'PURE_RC_AIR' in l or 'RC_AIR_RX' in l:
-                            d = json.loads(l)
-                            air_channels = d.get('ch', air_channels)
-                            air_rx_count = d.get('rx', d.get('rf_rx', air_rx_count))
-                            air_dt_us = d.get('dt_us', d.get('dt_rf_us', air_dt_us))
-                            last_air_time = t_now
-                            a_pkts_sec += 1
-                except:
+                            try:
+                                d = json.loads(l)
+                                air_channels = d.get('ch', air_channels)
+                                air_rx_count = d.get('rx', d.get('rf_rx', air_rx_count))
+                                raw_dt = d.get('dt_us', d.get('dt_rf_us', air_dt_us))
+                                if raw_dt and raw_dt >= 5000:  # Ignore sub-5ms local UART FIFO drains
+                                    air_dt_us = raw_dt
+                                last_air_time = t_now
+                                a_pkts_sec += 1
+                            except: pass
+                except (serial.SerialException, OSError):
                     air_ser = None
 
             # FPS calculate every second
@@ -117,13 +123,18 @@ def main():
                 t_calc = t_now
 
             # Render display at ~30 FPS
+            is_pure_rc = (air_fps > 35 or ground_fps > 35)
+            title = "ULTRA-RC 55.5 HZ HIGH-SPEED LINK BENCH MONITOR" if is_pure_rc else "DUAL-LRS 20.0 HZ TDM RC LINK BENCH MONITOR"
+            cadence_str = "18.0 ms" if is_pure_rc else "50.0 ms"
+
             sys.stdout.write("\033[H")
             print(f"{GREEN}========================================================================{RESET}")
-            print(f"   {GREEN}ULTRA-RC 55.5 HZ HIGH-SPEED LINK BENCH MONITOR{RESET}")
+            print(f"   {GREEN}{title}{RESET}")
             print(f"{GREEN}========================================================================{RESET}")
-            print(f" Ground TX (ESP32):   {CYAN}{ground_tx_count:6d} pkts{RESET}  Cadence: {CYAN}18.0 ms{RESET} ({ground_fps:4.1f} Hz report)")
-            air_alive = (t_now - last_air_time < 0.5 and air_rx_count > 0)
-            air_status = f"{GREEN}ACTIVE (dt={air_dt_us/1000.0:4.1f}ms / {1000000.0/air_dt_us if air_dt_us>0 else 0:4.1f}Hz){RESET}" if air_alive else f"{RED}WAITING AIR USB (/dev/ttyACM0){RESET}"
+            print(f" Ground TX (ESP32):   {CYAN}{ground_tx_count:6d} pkts{RESET}  Cadence: {CYAN}{cadence_str}{RESET} ({ground_fps:4.1f} Hz report)")
+            air_alive = (t_now - last_air_time < 1.0 and air_rx_count > 0)
+            disp_hz = air_fps if air_fps > 0 else (1000000.0/air_dt_us if air_dt_us>0 else 0)
+            air_status = f"{GREEN}ACTIVE (dt={air_dt_us/1000.0:4.1f}ms / {disp_hz:4.1f}Hz){RESET}" if air_alive else f"{RED}WAITING AIR USB (/dev/ttyACM0){RESET}"
             print(f" Air RX (BlackPill):  {YELLOW}{air_rx_count:6d} pkts{RESET}  Status:  {air_status}")
             
             active_src = "AIR UNIT (OVER-THE-AIR RF)" if air_alive else "GROUND UNIT (HANDSET INGEST)"

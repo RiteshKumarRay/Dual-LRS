@@ -129,7 +129,7 @@ bool TdmEngine::sendTransportFrame(TransportChannel channel, uint8_t flags, uint
     // Air: wait up to 2ms
     if (_radio.isBusy()) {
         if (_role == NodeRole::GROUND) {
-            if (!_radio.waitForReady(5)) {
+            if (!_radio.waitForReady(12)) {
                 return false; // Skip this slot to avoid spill
             }
         } else {
@@ -183,7 +183,7 @@ bool TdmEngine::sendRawTransportFrame(const uint8_t* frame, size_t length) {
 
     if (_radio.isBusy()) {
         if (_role == NodeRole::GROUND) {
-            if (!_radio.waitForReady(5)) {
+            if (!_radio.waitForReady(12)) {
                 return false;
             }
         } else {
