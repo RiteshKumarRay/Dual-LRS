@@ -80,6 +80,9 @@ public:
         _paramDownloadActive = true;
         _lastParamRxMs = millis();
     }
+    bool isMissionActive() const {
+        return _missionTransferActive && (millis() - _lastMissionIngestMs < 2500);
+    }
     uint32_t rawBytesRead() const { return _rawBytesRead; }
 
 private:
@@ -91,6 +94,7 @@ private:
     uint32_t _validParamValues = 0;
     uint32_t _lastParamRxMs = 0;
     bool     _paramDownloadActive = false;
+    bool     _missionTransferActive = false;
     uint32_t _lastLocalByteMs = 0;
     uint32_t _lastSysStatusMs = 0;   // SYS_STATUS  (msgid 1)   — battery
     uint32_t _lastGpsMs = 0;         // GPS_RAW_INT (msgid 24)  — GPS fix & satellites
@@ -98,6 +102,7 @@ private:
     uint32_t _lastAttitudeMs = 0;    // ATTITUDE    (msgid 30)  — roll/pitch/yaw
     uint32_t _lastVfrHudMs = 0;      // VFR_HUD     (msgid 74)  — airspeed, alt
     uint32_t _lastBatteryStatusMs = 0; // BATTERY_STATUS (msgid 147) — smart battery
+    uint32_t _lastRcChannelsMs = 0;    // RC_CHANNELS (msgid 65) — radio calibration in GCS
     // ---- Air-side TX parser (FC → RF queue) ----
     enum class RxState {
         IDLE,

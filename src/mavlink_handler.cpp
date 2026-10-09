@@ -241,6 +241,11 @@ void MavlinkHandler::readFromLocal() {
         _txQueue.clear(); // Flush residual scraps so fresh telemetry starts with 0 backlog!
     }
 
+    // Auto-clear mission transfer active state when 2.5s elapse since last mission packet
+    if (_missionTransferActive && (now - _lastMissionIngestMs > 2500)) {
+        _missionTransferActive = false;
+    }
+
     // Allow draining up to 512 bytes per call to match the hardware SERIAL_RX_BUFFER_SIZE.
     // In STM32duino, available() and read() read from non-blocking RAM ring buffer (takes nanoseconds),
     // so draining prevents UART hardware buffer overrun during parameter and telemetry bursts.
@@ -320,8 +325,11 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 // Air: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
                 // Always overwrite with the newest mission packet — no 400ms lockout.
                 // getOutboundPacket() does an atomic copy-and-clear so overwriting is safe.
-                // The old lockout caused FC's MISSION_ITEM_INT response to be silently dropped
-                // when _missionPending was still true from the preceding MISSION_COUNT ingest.
+                if (msgid == 47) {
+                    _missionTransferActive = false; // MISSION_ACK marks mission complete: immediately restore telemetry!
+                } else {
+                    _missionTransferActive = true;  // Active mission transfer: mute background telemetry for 100% bandwidth
+                }
                 if (_rxExpectedLen <= sizeof(_missionCache)) {
                     memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
                     _missionLen = (uint8_t)_rxExpectedLen;
@@ -366,18 +374,20 @@ void MavlinkHandler::parseByte(uint8_t c) {
                                          msgid == 24  ||  // GPS_RAW_INT (sats)
                                          msgid == 33  ||  // GLOBAL_POSITION_INT (lat/lon/alt)
                                          msgid == 74  ||  // VFR_HUD
-                                         msgid == 147);   // BATTERY_STATUS
+                                         msgid == 147 ||  // BATTERY_STATUS
+                                         msgid == 65);   // RC_CHANNELS (GCS Radio Calibration)
 
                 if (freeSpace < _rxExpectedLen) {
                     drop = true; // Hard limit: physically no room in FIFO
                 } else if (isCriticalMavlinkMessage(msgid)) {
                     drop = false; // Critical (params, heartbeat, mission, commands): always pass
                 } else if (isEssentialTelem) {
-                    // During parameter download, mute all streaming telemetry so 100% of RF slots carry parameters!
-                    if (_paramDownloadActive) {
+                    // During parameter download or mission transfers, mute all streaming telemetry
+                    // so 100% of RF slots carry parameters or mission items!
+                    if (_paramDownloadActive || (_missionTransferActive && (millis() - _lastMissionIngestMs < 2500))) {
                         drop = true;
                     } else {
-                        // Allow essential HUD telemetry: GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
+                        // Allow essential HUD telemetry: GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms), RC_CHANNELS @ 1Hz (1000ms)
                         uint32_t* lastMs = nullptr;
                         uint32_t minIntervalMs = 1000;
                         if      (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
@@ -385,6 +395,7 @@ void MavlinkHandler::parseByte(uint8_t c) {
                         else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
                         else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
                         else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
+                        else if (msgid == 65)  { lastMs = &_lastRcChannelsMs;    minIntervalMs = 1000; } // 1 Hz
 
                         if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
                             *lastMs = millis();
@@ -396,7 +407,7 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (_rxExpectedLen > MAX_PAYLOAD_AIR_SLOT) {
                     drop = true; // Non-critical packets exceeding slot size should never fragment
                 } else {
-                    // Drop all other streaming telemetry (RAW_IMU, SCALED_PRESSURE, AHRS, HWSTATUS, RC_CHANNELS, etc.)
+                    // Drop all other streaming telemetry (RAW_IMU, SCALED_PRESSURE, AHRS, HWSTATUS, etc.)
                     // to permanently eliminate FIFO bufferbloat!
                     drop = true;
                 }
@@ -425,6 +436,11 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (isMissionMavlinkMessage(msgid)) {
                     // Ground: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
                     // Always overwrite with the newest mission command — no 400ms lockout.
+                    if (msgid == 47) {
+                        _missionTransferActive = false;
+                    } else {
+                        _missionTransferActive = true;
+                    }
                     if (_rxExpectedLen <= sizeof(_missionCache)) {
                         memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
                         _missionLen = (uint8_t)_rxExpectedLen;
@@ -518,6 +534,11 @@ void MavlinkHandler::parseByte(uint8_t c) {
                     // Air: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
                     // Always overwrite with the newest mission packet — no 400ms lockout.
                     // getOutboundPacket() does an atomic copy-and-clear so overwriting is safe.
+                    if (msgid == 47) {
+                        _missionTransferActive = false; // MISSION_ACK marks mission complete: immediately restore telemetry!
+                    } else {
+                        _missionTransferActive = true;  // Active mission transfer: mute background telemetry for 100% bandwidth
+                    }
                     if (_rxExpectedLen <= sizeof(_missionCache)) {
                         memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
                         _missionLen = (uint8_t)_rxExpectedLen;
@@ -562,18 +583,20 @@ void MavlinkHandler::parseByte(uint8_t c) {
                                          msgid == 24  ||  // GPS_RAW_INT (sats)
                                          msgid == 33  ||  // GLOBAL_POSITION_INT (lat/lon/alt)
                                          msgid == 74  ||  // VFR_HUD
-                                         msgid == 147);   // BATTERY_STATUS
+                                         msgid == 147 ||  // BATTERY_STATUS
+                                         msgid == 65);   // RC_CHANNELS (GCS Radio Calibration)
 
                 if (freeSpace < _rxExpectedLen) {
                     drop = true; // Hard limit: physically no room in FIFO
                 } else if (isCriticalMavlinkMessage(msgid)) {
                     drop = false; // Critical (params, heartbeat, mission, commands): always pass
                 } else if (isEssentialTelem) {
-                    // During parameter download, mute all streaming telemetry so 100% of RF slots carry parameters!
-                    if (_paramDownloadActive) {
+                    // During parameter download or mission transfers, mute all streaming telemetry
+                    // so 100% of RF slots carry parameters or mission items!
+                    if (_paramDownloadActive || (_missionTransferActive && (millis() - _lastMissionIngestMs < 2500))) {
                         drop = true;
                     } else {
-                        // Allow essential HUD telemetry: GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms)
+                        // Allow essential HUD telemetry: GPS & HUD @ 2Hz (500ms), SYS_STATUS @ 1Hz (1000ms), RC_CHANNELS @ 1Hz (1000ms)
                         uint32_t* lastMs = nullptr;
                         uint32_t minIntervalMs = 1000;
                         if      (msgid == 74)  { lastMs = &_lastVfrHudMs;        minIntervalMs = 500; }  // 2 Hz
@@ -581,6 +604,7 @@ void MavlinkHandler::parseByte(uint8_t c) {
                         else if (msgid == 33)  { lastMs = &_lastGlobalPosMs;     minIntervalMs = 500; }  // 2 Hz
                         else if (msgid == 1)   { lastMs = &_lastSysStatusMs;     minIntervalMs = 1000; } // 1 Hz
                         else if (msgid == 147) { lastMs = &_lastBatteryStatusMs; minIntervalMs = 1000; } // 1 Hz
+                        else if (msgid == 65)  { lastMs = &_lastRcChannelsMs;    minIntervalMs = 1000; } // 1 Hz
 
                         if (lastMs && (millis() - *lastMs >= minIntervalMs)) {
                             *lastMs = millis();
@@ -592,7 +616,7 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (_rxExpectedLen > MAX_PAYLOAD_AIR_SLOT) {
                     drop = true; // Non-critical packets exceeding slot size should never fragment
                 } else {
-                    // Drop all other streaming telemetry (RAW_IMU, SCALED_PRESSURE, AHRS, HWSTATUS, RC_CHANNELS, etc.)
+                    // Drop all other streaming telemetry (RAW_IMU, SCALED_PRESSURE, AHRS, HWSTATUS, etc.)
                     // to permanently eliminate FIFO bufferbloat!
                     drop = true;
                 }
@@ -621,8 +645,11 @@ void MavlinkHandler::parseByte(uint8_t c) {
                 } else if (isMissionMavlinkMessage(msgid)) {
                     // Ground: Dedicated mission cache bypass (MISSION_COUNT, MISSION_REQUEST, MISSION_ITEM, MISSION_ACK)
                     // Always overwrite with the newest mission command — no 400ms lockout.
-                    // GCS sends MISSION_REQUEST_LIST followed quickly by MISSION_REQUEST_INT;
-                    // the old lockout silently dropped the 2nd command before it reached Air over RF.
+                    if (msgid == 47) {
+                        _missionTransferActive = false;
+                    } else {
+                        _missionTransferActive = true;
+                    }
                     if (_rxExpectedLen <= sizeof(_missionCache)) {
                         memcpy(_missionCache, _rxBuffer, _rxExpectedLen);
                         _missionLen = (uint8_t)_rxExpectedLen;
@@ -762,7 +789,8 @@ size_t MavlinkHandler::getOutboundPayload(uint8_t* dest, size_t maxLen) {
     }
 
     // 7. Fast-path Attitude bypass (bypasses FIFO queue to deliver real-time orientation, paced at 4-5 Hz)
-    if (!_paramDownloadActive && _attitudePending && _attitudeLen > 0 && (millis() - _lastAttitudeTxMs >= 200)) {
+    if (!_paramDownloadActive && !(_missionTransferActive && (millis() - _lastMissionIngestMs < 2500)) &&
+        _attitudePending && _attitudeLen > 0 && (millis() - _lastAttitudeTxMs >= 200)) {
         size_t toSend = (_attitudeLen < maxLen) ? _attitudeLen : maxLen;
         memcpy(dest, _attitudeCache, toSend);
         if (toSend < _attitudeLen) {

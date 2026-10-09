@@ -331,8 +331,21 @@ TransportNackReason TransportReassembler::process_fragment(const TransportHeader
     } else {
         // Active transfer in progress: preserve active transfer, reject new transfer_id
         if (hdr.transfer_id != active_transfer_id_ || hdr.channel != (uint8_t)active_channel_) {
-            stats_.buffer_full_rejections++;
-            return TransportNackReason::BUFFER_FULL;
+            // Fast recovery: If active transfer stalled with no fragment for > 150ms (2+ TDM cycles)
+            // and incoming packet is a fresh FIRST_FRAG, abandon the stale transfer immediately
+            // to prevent 1000ms BUFFER_FULL lockout.
+            if ((hdr.flags & TRANSPORT_FLAG_FIRST_FRAG) && (current_time_ms - last_activity_time_ms_ > 150)) {
+                stats_.timeouts++;
+                has_active_transfer_ = true;
+                is_complete_ = false;
+                active_channel_ = (TransportChannel)hdr.channel;
+                active_transfer_id_ = hdr.transfer_id;
+                range_count_ = 0;
+                total_size_ = 0;
+            } else {
+                stats_.buffer_full_rejections++;
+                return TransportNackReason::BUFFER_FULL;
+            }
         }
 
         // Duplicate vs partial overlap check

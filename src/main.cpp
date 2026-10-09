@@ -445,6 +445,7 @@ void loop() {
         requestStream(SerialTELEM, 6,  2); // POSITION (GPS)           at 2 Hz
         requestStream(SerialTELEM, 10, 4); // EXTRA1 (Attitude)        at 4 Hz
         requestStream(SerialTELEM, 11, 2); // EXTRA2 (VFR_HUD)         at 2 Hz
+        requestStream(SerialTELEM, 3,  1); // RC_CHANNELS (Calibration) at 1 Hz
     }
     #endif
 
@@ -509,9 +510,12 @@ void loop() {
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
                 bool has_uplink_mavlink = groundUplinkFragmenter.has_next_fragment() || telemHandler.hasOutboundData();
                 static uint8_t slotsSinceRc = 0;
-                // Priority interleaving: When RC and GCS uplink are both active,
-                // allow 1 GCS command slot every 4 cycles (slotsSinceRc >= 3) to prevent RC starvation
-                if (has_rc && has_uplink_mavlink && slotsSinceRc >= 3) {
+                // Priority interleaving: When RC and GCS uplink are both active:
+                // During active mission transfer, boost GCS uplink to 1 slot every 2 cycles (slotsSinceRc >= 1)
+                // so waypoint handshakes execute 2x faster (140ms round-trip) without starving RC.
+                // In normal telemetry mode, allow 1 GCS slot every 4 cycles (slotsSinceRc >= 3) to minimize RC jitter.
+                uint8_t maxRcSlots = telemHandler.isMissionActive() ? 1 : 3;
+                if (has_rc && has_uplink_mavlink && slotsSinceRc >= maxRcSlots) {
                     send_rc = false;
                     slotsSinceRc = 0;
                 } else if (has_rc) {
