@@ -34,8 +34,11 @@ def make_bar(val_us, width=28):
 
 def main():
     mav = None
+    # Note: Configure the MAVLink connection host and port here
+    # Default to localhost (127.0.0.1:5760) for testing against SITL or a local bridge
+    # For remote GCS, update the connection string to your bridge IP, e.g. 'tcp:192.168.1.100:5760'
     try:
-        mav = mavutil.mavlink_connection('tcp:10.94.163.186:5760')
+        mav = mavutil.mavlink_connection('tcp:127.0.0.1:5760')
         mav.wait_heartbeat(timeout=2)
     except Exception:
         mav = None

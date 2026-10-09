@@ -1,3 +1,6 @@
+# Binary media (photos, schematics)
+image/
+
 # PlatformIO build artifacts
 .pio/
 .pioenvs/
