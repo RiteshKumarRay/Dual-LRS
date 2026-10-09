@@ -22,8 +22,8 @@
     #define SerialTELEM Serial2
     const NodeRole CURRENT_ROLE = NodeRole::AIR;
     MavlinkHandler telemHandler(SerialTELEM);
-    // Air unit CRSF output to Flight Controller RC_IN via Hardware USART6 (PA11 TX / PA12 RX @ 420,000 baud)
-    Uart SerialAirCRSF(PIN_AIR_CRSF_RX, PIN_AIR_CRSF_TX);
+    // Air unit CRSF output to Flight Controller RC_IN mapped directly to hardware Serial6
+    #define SerialAirCRSF Serial6
     static RcAirAdapter rcAirAdapter;
 #else
     #define SerialRadio Serial1
@@ -276,8 +276,20 @@ void setup() {
         Serial1.begin(SCAN_PROFILES[0].baud, SCAN_PROFILES[0].uart_config, PIN_GROUND_RC_RX, PIN_GROUND_RC_TX, SCAN_PROFILES[0].invert);
         lastScanSwitchMs = millis();
     #elif defined(DUAL_LRS_ROLE_AIR)
-        // Air CRSF output on hardware USART6 (PA11 TX / PA12 RX @ 420,000 baud)
+        // Air CRSF output on hardware Serial6 (PA11 TX / PA12 RX @ 420,000 baud)
+        SerialAirCRSF.setRx(PIN_AIR_CRSF_RX);
+        SerialAirCRSF.setTx(PIN_AIR_CRSF_TX);
         SerialAirCRSF.begin(AIR_CRSF_BAUD);
+
+        // Emit an initial sync burst of CRSF frames so Flight Controller detects receiver immediately
+        uint8_t init_buf[CRSF_FRAME_RC_TOTAL_SIZE];
+        size_t init_len = rcAirAdapter.get_fc_frame(init_buf);
+        if (init_len > 0) {
+            for (int i = 0; i < 5; ++i) {
+                SerialAirCRSF.write(init_buf, init_len);
+                delay(2);
+            }
+        }
     #endif
 
     tdm.onPacketReceived(onRadioPacketReceived);
@@ -366,12 +378,18 @@ void loop() {
         }
     }
 #elif defined(DUAL_LRS_ROLE_AIR)
-    // 1. Update Air RC failsafe watchdog and emit 26B CRSF frame to FC RC_IN on PA11
+    // 1. Update Air RC failsafe watchdog
     rcAirAdapter.update(now);
-    if (rcAirAdapter.has_new_frame()) {
+
+    // 2. Continuous 50 Hz CRSF stream (every 20 ms) or immediate transmit on fresh RF frame
+    static uint32_t lastAirCrsfTxMs = 0;
+    bool freshFrame = rcAirAdapter.has_new_frame();
+    if (freshFrame || (now - lastAirCrsfTxMs >= 20)) {
+        lastAirCrsfTxMs = now;
+        rcAirAdapter.clear_new_frame();
+
         uint8_t fc_crsf_buf[CRSF_FRAME_RC_TOTAL_SIZE];
         size_t fc_crsf_len = rcAirAdapter.get_fc_frame(fc_crsf_buf);
-        rcAirAdapter.clear_new_frame();
         if (fc_crsf_len > 0) {
             SerialAirCRSF.write(fc_crsf_buf, fc_crsf_len);
         }

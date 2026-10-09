@@ -246,8 +246,10 @@ private:
 // -----------------------------------------------------------------------------
 class RcAirAdapter {
 public:
-    RcAirAdapter() : has_channels_(false), has_new_frame_(false), was_failsafe_(false), last_valid_time_ms_(0), stats_{} {
-        memset(last_channels_, 0, sizeof(last_channels_));
+    RcAirAdapter() : has_channels_(true), has_new_frame_(false), was_failsafe_(false), last_valid_time_ms_(0), stats_{} {
+        for (size_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+            last_channels_[i] = (i == 2) ? CRSF_CHANNEL_VALUE_MIN : CRSF_CHANNEL_VALUE_MID;
+        }
     }
 
     // Ingests verified RC_CONTROL frame from TransportParser
@@ -289,13 +291,16 @@ public:
     }
 
     // Formats a 26-byte CRSF frame for the Flight Controller.
-    // Returns 26 if frame generated, 0 if failsafe active (standard "No Pulses" policy).
+    // Transmits live stick positions or safe failsafe defaults (throttle low, sticks centered).
     size_t get_fc_frame(uint8_t* out_frame26) {
         if (!out_frame26 || !has_channels_) return 0;
 
-        // In failsafe: suppress CRSF pulses so Flight Controller detects RC loss immediately
         if (failsafe_.is_failsafe_active()) {
-            return 0;
+            uint16_t fs_channels[CRSF_NUM_CHANNELS];
+            for (size_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
+                fs_channels[i] = (i == 2) ? CRSF_CHANNEL_VALUE_MIN : CRSF_CHANNEL_VALUE_MID;
+            }
+            return crsf_encode_rc_frame(CRSF_ADDRESS_FLIGHT_CONTROLLER, fs_channels, out_frame26);
         }
 
         return crsf_encode_rc_frame(CRSF_ADDRESS_FLIGHT_CONTROLLER, last_channels_, out_frame26);
