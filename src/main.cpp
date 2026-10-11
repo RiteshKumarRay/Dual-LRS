@@ -4,6 +4,7 @@
 #include "tdm_engine.h"
 #include "mavlink_handler.h"
 #include "rc_adapter.h"
+#include "link_transport.h"
 
 #if defined(ESP32)
 #include "soc/soc.h"
@@ -49,12 +50,10 @@ E22Driver radio(SerialRadio, PIN_RADIO_M0, PIN_RADIO_M1, PIN_RADIO_AUX);
 TdmEngine tdm(radio, CURRENT_ROLE);
 
 #if defined(DUAL_LRS_ROLE_AIR)
-static TransportFragmenter airDownlinkFragmenter;
-static TransportReassembler airReassembler;
+static LinkTransport linkTransport(TransportNodeRole::AIR);
 static uint8_t airTxMsgBuf[TRANSPORT_MAX_TRANSFER_SIZE];
 #else
-static TransportFragmenter groundUplinkFragmenter;
-static TransportReassembler groundReassembler;
+static LinkTransport linkTransport(TransportNodeRole::GROUND);
 static uint8_t groundTxMsgBuf[TRANSPORT_MAX_TRANSFER_SIZE];
 #endif
 
@@ -130,24 +129,32 @@ void onTransportFrameReceived(const TransportHeader& hdr, const uint8_t* payload
         }
     }
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
-    else if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_UPLINK) {
-        TransportNackReason nack = airReassembler.process_fragment(hdr, payload, millis());
-        if (nack == TransportNackReason::NONE && airReassembler.is_complete()) {
-            telemHandler.writeToLocal(airReassembler.get_reassembled_data(),
-                                      airReassembler.get_reassembled_length());
-            airReassembler.mark_complete_consumed();
+    else if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_UPLINK ||
+             hdr.channel == (uint8_t)TransportChannel::LINK_CONTROL) {
+        linkTransport.ingest_transport_frame(hdr, payload, length, millis());
+        if (linkTransport.has_received_message()) {
+            uint8_t reasm_buf[TRANSPORT_MAX_TRANSFER_SIZE];
+            size_t reasm_len = linkTransport.get_received_message(reasm_buf, sizeof(reasm_buf));
+            if (reasm_len > 0) {
+                telemHandler.writeToLocal(reasm_buf, reasm_len);
+            }
+            linkTransport.pop_received_message();
         }
     }
 #endif
 #else
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
-    if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_DOWNLINK) {
-        TransportNackReason nack = groundReassembler.process_fragment(hdr, payload, millis());
-        if (nack == TransportNackReason::NONE && groundReassembler.is_complete()) {
+    if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_DOWNLINK ||
+        hdr.channel == (uint8_t)TransportChannel::LINK_CONTROL) {
+        linkTransport.ingest_transport_frame(hdr, payload, length, millis());
+        if (linkTransport.has_received_message()) {
             gcsDataPktsRx++;
-            telemHandler.writeToLocal(groundReassembler.get_reassembled_data(),
-                                      groundReassembler.get_reassembled_length());
-            groundReassembler.mark_complete_consumed();
+            uint8_t reasm_buf[TRANSPORT_MAX_TRANSFER_SIZE];
+            size_t reasm_len = linkTransport.get_received_message(reasm_buf, sizeof(reasm_buf));
+            if (reasm_len > 0) {
+                telemHandler.writeToLocal(reasm_buf, reasm_len);
+            }
+            linkTransport.pop_received_message();
         }
     }
 #endif
@@ -399,11 +406,7 @@ void loop() {
     // 2. Read bytes from local MAVLink stream (FC or Mission Planner)
     telemHandler.readFromLocal();
 
-#if defined(DUAL_LRS_ROLE_AIR)
-    airReassembler.check_timeout(now);
-#else
-    groundReassembler.check_timeout(now);
-#endif
+    linkTransport.update(now);
 
     // [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
     // #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
@@ -508,13 +511,13 @@ void loop() {
                 // frame must not be displaced by a queued GCS packet.
                 bool send_rc = has_rc;
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
-                bool has_uplink_mavlink = groundUplinkFragmenter.has_next_fragment() || telemHandler.hasOutboundData();
+                bool has_uplink_mavlink = linkTransport.has_outgoing_frame() || telemHandler.hasOutboundData();
                 static uint8_t slotsSinceRc = 0;
                 // Priority interleaving: When RC and GCS uplink are both active:
-                // During active mission transfer, boost GCS uplink to 1 slot every 2 cycles (slotsSinceRc >= 1)
-                // so waypoint handshakes execute 2x faster (140ms round-trip) without starving RC.
+                // During active mission transfer or pending ACK, boost GCS uplink to 1 slot every 2 cycles (slotsSinceRc >= 1)
+                // so waypoint handshakes and ACKs execute 2x faster (180ms round-trip) without starving RC.
                 // In normal telemetry mode, allow 1 GCS slot every 4 cycles (slotsSinceRc >= 3) to minimize RC jitter.
-                uint8_t maxRcSlots = telemHandler.isMissionActive() ? 1 : 3;
+                uint8_t maxRcSlots = (telemHandler.isMissionActive() || linkTransport.has_pending_ack_nack()) ? 1 : 3;
                 if (has_rc && has_uplink_mavlink && slotsSinceRc >= maxRcSlots) {
                     send_rc = false;
                     slotsSinceRc = 0;
@@ -523,15 +526,15 @@ void loop() {
                     slotsSinceRc++;
                 }
                 if (!send_rc && has_uplink_mavlink) {
-                    if (!groundUplinkFragmenter.has_next_fragment()) {
+                    if (!linkTransport.is_tx_active() && !linkTransport.has_pending_ack_nack()) {
                         size_t pkt_len = telemHandler.getOutboundPacket(groundTxMsgBuf, sizeof(groundTxMsgBuf));
                         if (pkt_len > 0) {
-                            groundUplinkFragmenter.start_transfer(TransportChannel::MAVLINK_UPLINK, groundTxMsgBuf, (uint16_t)pkt_len, false);
+                            linkTransport.start_transfer(TransportChannel::MAVLINK_UPLINK, groundTxMsgBuf, (uint16_t)pkt_len, true);
                         }
                     }
-                    if (groundUplinkFragmenter.has_next_fragment()) {
+                    if (linkTransport.has_outgoing_frame()) {
                         uint8_t frame_buf[TRANSPORT_MAX_FRAME_SIZE];
-                        size_t frame_len = groundUplinkFragmenter.get_next_fragment(frame_buf, tdm.getNextSequence());
+                        size_t frame_len = linkTransport.get_next_tx_frame(frame_buf, tdm.getNextSequence(), now);
                         if (frame_len > 0) {
                             ok = tdm.sendRawTransportFrame(frame_buf, frame_len);
                             if (ok) gcsMavlinkRfSent++;
@@ -556,15 +559,16 @@ void loop() {
 #if defined(DUAL_LRS_ROLE_AIR)
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
                 // Stage 3.2 MAVLink Downlink Telemetry (Air -> Ground)
-                if (!airDownlinkFragmenter.has_next_fragment()) {
+                if (!linkTransport.is_tx_active() && !linkTransport.has_pending_ack_nack()) {
                     size_t pkt_len = telemHandler.getNormalTelemetryPayload(airTxMsgBuf, sizeof(airTxMsgBuf));
                     if (pkt_len > 0) {
-                        airDownlinkFragmenter.start_transfer(TransportChannel::MAVLINK_DOWNLINK, airTxMsgBuf, (uint16_t)pkt_len, false);
+                        bool reliable = (pkt_len > 49) || telemHandler.isMissionActive() || telemHandler.isParamDownloadActive();
+                        linkTransport.start_transfer(TransportChannel::MAVLINK_DOWNLINK, airTxMsgBuf, (uint16_t)pkt_len, reliable);
                     }
                 }
-                if (airDownlinkFragmenter.has_next_fragment()) {
+                if (linkTransport.has_outgoing_frame()) {
                     uint8_t frame_buf[TRANSPORT_MAX_FRAME_SIZE];
-                    size_t frame_len = airDownlinkFragmenter.get_next_fragment(frame_buf, tdm.getNextSequence());
+                    size_t frame_len = linkTransport.get_next_tx_frame(frame_buf, tdm.getNextSequence(), now);
                     if (frame_len > 0) {
                         ok = tdm.sendRawTransportFrame(frame_buf, frame_len);
                         if (ok) gcsMavlinkRfSent++;
