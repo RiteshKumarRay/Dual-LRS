@@ -151,7 +151,7 @@ bool test_air_downlink_single_burst() {
     ground_got_packet = false;
     ground_received_data.clear();
 
-    tdm_ground.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t length) {
+    tdm_ground.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t /*length*/) {
         if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_DOWNLINK) {
             static TransportReassembler r;
             TransportNackReason nack = r.process_fragment(hdr, payload, g_mock_millis);
@@ -209,7 +209,7 @@ bool test_air_downlink_multi_fragment() {
     static TransportReassembler test_reassembler;
     test_reassembler.reset();
 
-    tdm_ground.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t length) {
+    tdm_ground.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t /*length*/) {
         if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_DOWNLINK) {
             TransportNackReason nack = test_reassembler.process_fragment(hdr, payload, g_mock_millis);
             if (nack == TransportNackReason::NONE && test_reassembler.is_complete()) {
@@ -282,7 +282,7 @@ bool test_ground_uplink_command_transfer() {
     air_got_cmd = false;
     air_cmd_data.clear();
 
-    tdm_air.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t length) {
+    tdm_air.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t /*length*/) {
         if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_UPLINK) {
             TransportNackReason nack = air_reassembler.process_fragment(hdr, payload, g_mock_millis);
             if (nack == TransportNackReason::NONE && air_reassembler.is_complete()) {
@@ -343,7 +343,7 @@ bool test_rc_and_mavlink_coexistence() {
     air_rc_frames_received = 0;
     air_cmd_completed = false;
 
-    tdm_air.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t length) {
+    tdm_air.onTransportFrameReceived([](const TransportHeader& hdr, const uint8_t* payload, uint16_t /*length*/) {
         if (hdr.channel == (uint8_t)TransportChannel::RC_CONTROL) {
             air_rc_frames_received++;
         } else if (hdr.channel == (uint8_t)TransportChannel::MAVLINK_UPLINK) {

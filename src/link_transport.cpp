@@ -11,6 +11,9 @@ LinkTransport::LinkTransport(TransportNodeRole role)
       ack_queue_tail_(0),
       current_reliable_frame_len_(0),
       current_reliable_seq_(0),
+      current_reliable_channel_(TransportChannel::LINK_CONTROL),
+      current_reliable_transfer_id_(0),
+      current_reliable_offset_(0),
       has_current_reliable_frame_(false),
       nack_retransmit_pending_(false),
       timeout_retransmit_pending_(false),
@@ -28,6 +31,9 @@ void LinkTransport::reset() {
     ack_queue_tail_ = 0;
     current_reliable_frame_len_ = 0;
     current_reliable_seq_ = 0;
+    current_reliable_channel_ = TransportChannel::LINK_CONTROL;
+    current_reliable_transfer_id_ = 0;
+    current_reliable_offset_ = 0;
     has_current_reliable_frame_ = false;
     nack_retransmit_pending_ = false;
     timeout_retransmit_pending_ = false;
@@ -193,6 +199,9 @@ size_t LinkTransport::get_next_tx_frame(uint8_t* out_frame_buf, uint16_t next_se
                 // Lockstep reliable transfer: arm retry manager with exact frame bytes
                 retry_manager_.arm(out_frame_buf, frame_len, hdr.transfer_id, hdr.fragment_offset, current_time_ms);
                 has_current_reliable_frame_ = true;
+                current_reliable_channel_ = (TransportChannel)hdr.channel;
+                current_reliable_transfer_id_ = hdr.transfer_id;
+                current_reliable_offset_ = hdr.fragment_offset;
                 current_reliable_seq_ = next_seq;
                 current_reliable_frame_len_ = frame_len;
                 memcpy(current_reliable_frame_, out_frame_buf, frame_len);
@@ -219,8 +228,21 @@ bool LinkTransport::ingest_transport_frame(const TransportHeader& hdr, const uin
         if (hdr.payload_length >= sizeof(TransportLinkAckNack) && payload[0] == (uint8_t)LinkSubtype::ACK_NACK) {
             TransportLinkAckNack an{};
             if (transport_decode_link_ack_nack(payload, &an)) {
+                // Strict validation: ACK/NACK must match the channel, transfer_id, and fragment_offset
+                // of the currently pending reliable fragment awaiting ACK.
+                bool is_waiting = has_current_reliable_frame_ && (retry_manager_.get_state() == RetryState::WAITING_ACK);
+                bool matches = is_waiting &&
+                                (an.target_channel == (uint8_t)current_reliable_channel_) &&
+                                (an.transfer_id == current_reliable_transfer_id_) &&
+                                (an.fragment_offset == current_reliable_offset_);
+
+                if (!matches) {
+                    // Stale, out-of-window, or mismatched ACK/NACK: safely ignored
+                    return false;
+                }
+
                 if (an.nack_reason == (uint8_t)TransportNackReason::NONE) {
-                    // Valid ACK
+                    // Valid matching ACK
                     if (retry_manager_.process_ack_nack(an)) {
                         stats_.acks_received++;
                         has_current_reliable_frame_ = false;
@@ -234,12 +256,10 @@ bool LinkTransport::ingest_transport_frame(const TransportHeader& hdr, const uin
                         return true;
                     }
                 } else {
-                    // NACK received
-                    if (retry_manager_.get_state() == RetryState::WAITING_ACK) {
-                        stats_.nacks_received++;
-                        nack_retransmit_pending_ = true;
-                        return true;
-                    }
+                    // Valid matching NACK: trigger immediate retransmission of stored fragment
+                    stats_.nacks_received++;
+                    nack_retransmit_pending_ = true;
+                    return true;
                 }
             }
         }

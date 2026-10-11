@@ -110,12 +110,15 @@ private:
     bool pop_ack_nack(TransportLinkAckNack* out_an);
 
     // Last reliable frame waiting for ACK (cached so retry uses identical sequence)
-    uint8_t  current_reliable_frame_[TRANSPORT_MAX_FRAME_SIZE];
-    size_t   current_reliable_frame_len_;
-    uint16_t current_reliable_seq_;
-    bool     has_current_reliable_frame_;
-    bool     nack_retransmit_pending_;
-    bool     timeout_retransmit_pending_;
+    uint8_t          current_reliable_frame_[TRANSPORT_MAX_FRAME_SIZE];
+    size_t           current_reliable_frame_len_;
+    uint16_t         current_reliable_seq_;
+    TransportChannel current_reliable_channel_;
+    uint16_t         current_reliable_transfer_id_;
+    uint16_t         current_reliable_offset_;
+    bool             has_current_reliable_frame_;
+    bool             nack_retransmit_pending_;
+    bool             timeout_retransmit_pending_;
 
     LinkTransportStats stats_;
 };

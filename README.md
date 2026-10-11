@@ -43,11 +43,13 @@ The current verified baseline provides:
   parameter download, transfer-time background telemetry suppression, and
   bounded normal-mode telemetry aggregation.
 * Host tests and embedded build targets for the transport, RC, TDM, and
-  telemetry-gating layers.
+  telemetry-gating layers (58/58 host tests passing).
 
-Mission and parameter flows have been bench verified, but production
-ACK/NACK/retry integration, packet-loss recovery, saturated-link testing,
-intentional RF cut-and-restore, and flight acceptance remain open.
+Production reliable transport (`LinkTransport`) is implemented with
+stop-and-wait lockstep fragmentation, 200 ms RTO, 5-retry limits, and
+dedicated ACK/NACK priority queues. Clean mission and parameter flows have been
+bench verified. Powered-node RF loss testing, armed failsafe validation, and
+flight acceptance remain open.
 
 ---
 
@@ -397,7 +399,7 @@ Dual-LRS/
 | **Air Slot** | 45 ms |
 | **Guard Intervals** | Gap 1: 5 ms; Gap 2: 8 ms |
 | **Clock Synchronization** | Ground master / Air slave with bounded slot synchronization |
-| **MAVLink Support** | Integrated fragmentation/reassembly, mission/parameter gating, and bounded telemetry aggregation; production retry reliability pending |
+| **MAVLink Support** | Integrated LinkTransport reliable stop-and-wait ACK/retry, fragmentation/reassembly, mission/parameter gating, and bounded telemetry aggregation |
 | **GCS Compatibility** | QGroundControl, Mission Planner, MAVProxy, pymavlink |
 | **Diagnostic Messages** | Automatic generation of MAVLink `RADIO_STATUS` (ID 109) |
 

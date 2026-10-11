@@ -271,7 +271,7 @@ def run_acceptance_suite():
                     if item.x != exp_lat or item.y != exp_lon or abs(item.z - exp_alt) > 0.1:
                         integrity_ok = False
 
-        cycle_ok = (upload_ok and download_ok and integrity_ok)
+        cycle_ok = (clear_ok and upload_ok and download_ok and integrity_ok)
         mission_results.append({
             "cycle": cycle,
             "success": cycle_ok,
@@ -302,8 +302,9 @@ def run_acceptance_suite():
     mission_avg_up = sum(r["upload_time"] for r in mission_results if r["success"]) / max(1, mission_success_count)
     mission_avg_down = sum(r["download_time"] for r in mission_results if r["success"]) / max(1, mission_success_count)
 
+    expected_param_count = param_results[0]["expected"] if (param_results and param_results[0]["expected"]) else "full"
     print(f"1. Parameter Downloads:   {param_success_count}/{TOTAL_PARAM_CYCLES} Passed (Success Rate: {param_success_count/TOTAL_PARAM_CYCLES*100:.1f}%)")
-    print(f"   - Average Duration:    {param_avg_time:.2f} seconds per 1037-parameter download")
+    print(f"   - Average Duration:    {param_avg_time:.2f} seconds per {expected_param_count}-parameter download")
     print(f"2. Mission Operations:    {mission_success_count}/{TOTAL_MISSION_CYCLES} Passed (Success Rate: {mission_success_count/TOTAL_MISSION_CYCLES*100:.1f}%)")
     print(f"   - Average Upload:      {mission_avg_up:.2f} seconds")
     print(f"   - Average Download:    {mission_avg_down:.2f} seconds")

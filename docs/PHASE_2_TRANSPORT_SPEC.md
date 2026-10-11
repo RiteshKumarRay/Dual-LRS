@@ -1,14 +1,13 @@
 # Dual-LRS Phase 2: Transport Layer Protocol Specification
 
-**Document Version:** 1.2.0
-**Status:** Integrated framing/reassembly specification; production ACK/NACK and retry integration remains incomplete
-**Date:** 2026-10-01
+**Document Version:** 1.3.0
+**Status:** Integrated LinkTransport reliable transport specification (stop-and-wait lockstep, 200 ms RTO, 5-retry limit, duplicate re-ACK)
+**Date:** 2026-10-11
 **Project:** Dual-LRS (Air: STM32F411 BlackPill, Ground: ESP32-WROOM-32, Modem: Ebyte E22-900T30D)
 
-The transport framing, CRC, fragmentation, and reassembly described here are
-integrated into the current Stage 3.2 path. The ACK/NACK and retry portions
-remain architecture requirements rather than a complete production loss-
-recovery guarantee.
+The transport framing, CRC, fragmentation, reassembly, and LinkTransport
+reliable stop-and-wait ACK/NACK/retry state machine are fully integrated into
+both Air and Ground firmware paths.
 
 ---
 

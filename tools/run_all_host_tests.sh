@@ -41,5 +41,5 @@ g++ -std=c++17 -Wall -Wextra -I include tools/test_link_transport.cpp src/link_t
 /tmp/test_lt
 
 echo -e "\n==============================================================="
-echo "SUCCESS: ALL 7 HOST TEST SUITES PASSED CLEANLY (54/54 TESTS)!"
+echo "SUCCESS: ALL 7 HOST TEST SUITES PASSED CLEANLY (58/58 TESTS)!"
 echo "==============================================================="

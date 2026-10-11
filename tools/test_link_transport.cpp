@@ -170,34 +170,73 @@ bool test_lost_fragment_causes_timeout_retry() {
 }
 
 // =============================================================================
-// TEST 4: Corrupted frame causes CRC failure and NACK
+// TEST 4: Corrupted frame causes CRC rejection at parser and timeout retry
 // =============================================================================
-bool test_corrupted_frame_causes_crc_failure_and_nack() {
+bool test_corrupted_frame_causes_crc_rejection_and_timeout_retry() {
     LinkTransport sender(TransportNodeRole::AIR);
     LinkTransport receiver(TransportNodeRole::GROUND);
+    TransportParser parser(TransportNodeRole::GROUND);
 
     uint8_t msg[] = {0xAA, 0xBB, 0xCC, 0xDD};
-    sender.start_transfer(TransportChannel::MAVLINK_DOWNLINK, msg, sizeof(msg), true);
+    TEST_ASSERT(sender.start_transfer(TransportChannel::MAVLINK_DOWNLINK, msg, sizeof(msg), true), "start_transfer failed");
 
     uint8_t wire_frame[TRANSPORT_MAX_FRAME_SIZE];
     size_t frame_len = sender.get_next_tx_frame(wire_frame, 1, 1000);
+    TEST_ASSERT(frame_len > 0, "failed to get frame");
 
-    // SIMULATED IMPAIRMENT: Corrupt byte in payload
+    // SIMULATED IMPAIRMENT: Corrupt byte in payload on RF link
     uint8_t corrupt_frame[TRANSPORT_MAX_FRAME_SIZE];
     memcpy(corrupt_frame, wire_frame, frame_len);
     corrupt_frame[TRANSPORT_HEADER_SIZE + 1] ^= 0xFF; // Flip bits
 
-    // TransportParser at link level detects CRC mismatch and emits NACK
-    uint16_t calc_crc = transport_crc16(corrupt_frame, frame_len - 2);
-    uint16_t wire_crc = transport_read_u16_be(&corrupt_frame[frame_len - 2]);
-    TEST_ASSERT(calc_crc != wire_crc, "corrupted frame must fail CRC");
+    // TransportParser at link level detects CRC mismatch and discards corrupted frame
+    bool parsed_ok = false;
+    for (size_t i = 0; i < frame_len; ++i) {
+        if (parser.feed_byte(corrupt_frame[i], 1005)) {
+            parsed_ok = true;
+        }
+    }
+    TEST_ASSERT(!parsed_ok, "corrupted frame must NOT be accepted by parser");
+    TEST_ASSERT(parser.get_stats().crc_errors > 0, "parser must record CRC error");
 
-    // Decode header to format link NACK
-    TransportHeader hdr{};
-    transport_decode_header(corrupt_frame, &hdr);
-    receiver.ingest_transport_frame(hdr, nullptr, 0, 1005); // Rejected
+    // Corrupted frame was dropped; receiver was NOT fed any data
+    TEST_ASSERT(!receiver.has_received_message(), "receiver must not have received anything");
 
-    std::cout << "  [PASS] test_corrupted_frame_causes_crc_failure_and_nack" << std::endl;
+    // Sender times out after 200ms RTO and generates exact retransmission
+    sender.update(1205);
+    TEST_ASSERT(sender.has_outgoing_frame(), "sender must have retry frame ready after timeout");
+
+    uint8_t retry_buf[TRANSPORT_MAX_FRAME_SIZE];
+    size_t retry_len = sender.get_next_tx_frame(retry_buf, 2, 1205);
+    TEST_ASSERT(retry_len == frame_len, "retry frame len mismatch");
+    TEST_ASSERT(memcmp(retry_buf, wire_frame, frame_len) == 0, "retry must send exact original frame");
+    TEST_ASSERT(sender.get_stats().retries_sent == 1, "retries_sent should be 1");
+
+    // Feed clean retransmitted frame through parser to receiver
+    parsed_ok = false;
+    for (size_t i = 0; i < retry_len; ++i) {
+        if (parser.feed_byte(retry_buf[i], 1210)) {
+            parsed_ok = true;
+            TransportHeader hdr = parser.get_header();
+            receiver.ingest_transport_frame(hdr, parser.get_payload(), hdr.payload_length, 1210);
+        }
+    }
+    TEST_ASSERT(parsed_ok, "clean retransmission must be accepted by parser");
+    TEST_ASSERT(receiver.has_received_message(), "receiver should now have complete message");
+
+    // Receiver generates ACK
+    uint8_t ack_wire[TRANSPORT_MAX_FRAME_SIZE];
+    size_t ack_len = receiver.get_next_tx_frame(ack_wire, 10, 1215);
+    TEST_ASSERT(ack_len > 0, "receiver must generate ACK");
+
+    TransportHeader ack_hdr{};
+    transport_decode_header(ack_wire, &ack_hdr);
+    sender.ingest_transport_frame(ack_hdr, &ack_wire[TRANSPORT_HEADER_SIZE], ack_hdr.payload_length, 1220);
+
+    TEST_ASSERT(!sender.is_tx_active(), "sender should be idle after ACK");
+    TEST_ASSERT(sender.get_stats().acks_received == 1, "acks_received should be 1");
+
+    std::cout << "  [PASS] test_corrupted_frame_causes_crc_rejection_and_timeout_retry" << std::endl;
     return true;
 }
 
@@ -578,6 +617,161 @@ bool test_failed_transfer_does_not_block_later_transfer() {
 }
 
 // =============================================================================
+// TEST 16: NACK for the wrong transfer is ignored
+// =============================================================================
+bool test_nack_wrong_transfer_id_ignored() {
+    LinkTransport sender(TransportNodeRole::GROUND);
+
+    uint8_t msg[] = {0x10, 0x20};
+    sender.start_transfer(TransportChannel::MAVLINK_UPLINK, msg, sizeof(msg), true);
+    uint8_t buf[TRANSPORT_MAX_FRAME_SIZE];
+    sender.get_next_tx_frame(buf, 1, 1000);
+
+    // Send NACK for WRONG transfer_id
+    TransportHeader nack_hdr{};
+    nack_hdr.channel = (uint8_t)TransportChannel::LINK_CONTROL;
+    nack_hdr.payload_length = sizeof(TransportLinkAckNack);
+
+    TransportLinkAckNack an{};
+    an.subtype = (uint8_t)LinkSubtype::ACK_NACK;
+    an.target_channel = (uint8_t)TransportChannel::MAVLINK_UPLINK;
+    an.transfer_id = sender.get_tx_transfer_id() + 77; // Wrong ID
+    an.fragment_offset = 0;
+    an.nack_reason = (uint8_t)TransportNackReason::GAP_DETECTED;
+
+    uint8_t nack_payload[8];
+    transport_encode_link_ack_nack(&an, nack_payload);
+
+    bool res = sender.ingest_transport_frame(nack_hdr, nack_payload, sizeof(nack_payload), 1010);
+    TEST_ASSERT(!res, "wrong transfer_id NACK must return false");
+    TEST_ASSERT(sender.get_stats().nacks_received == 0, "nacks_received must be 0");
+    TEST_ASSERT(!sender.has_outgoing_frame(), "wrong transfer_id NACK must not trigger retransmission");
+
+    std::cout << "  [PASS] test_nack_wrong_transfer_id_ignored" << std::endl;
+    return true;
+}
+
+// =============================================================================
+// TEST 17: NACK for the wrong fragment offset is ignored
+// =============================================================================
+bool test_nack_wrong_fragment_offset_ignored() {
+    LinkTransport sender(TransportNodeRole::GROUND);
+
+    uint8_t msg[] = {0x10, 0x20};
+    sender.start_transfer(TransportChannel::MAVLINK_UPLINK, msg, sizeof(msg), true);
+    uint8_t buf[TRANSPORT_MAX_FRAME_SIZE];
+    sender.get_next_tx_frame(buf, 1, 1000);
+
+    // Send NACK for WRONG offset
+    TransportHeader nack_hdr{};
+    nack_hdr.channel = (uint8_t)TransportChannel::LINK_CONTROL;
+    nack_hdr.payload_length = sizeof(TransportLinkAckNack);
+
+    TransportLinkAckNack an{};
+    an.subtype = (uint8_t)LinkSubtype::ACK_NACK;
+    an.target_channel = (uint8_t)TransportChannel::MAVLINK_UPLINK;
+    an.transfer_id = sender.get_tx_transfer_id();
+    an.fragment_offset = 49; // Wrong offset (active is 0)
+    an.nack_reason = (uint8_t)TransportNackReason::GAP_DETECTED;
+
+    uint8_t nack_payload[8];
+    transport_encode_link_ack_nack(&an, nack_payload);
+
+    bool res = sender.ingest_transport_frame(nack_hdr, nack_payload, sizeof(nack_payload), 1010);
+    TEST_ASSERT(!res, "wrong offset NACK must return false");
+    TEST_ASSERT(sender.get_stats().nacks_received == 0, "nacks_received must be 0");
+    TEST_ASSERT(!sender.has_outgoing_frame(), "wrong offset NACK must not trigger retransmission");
+
+    std::cout << "  [PASS] test_nack_wrong_fragment_offset_ignored" << std::endl;
+    return true;
+}
+
+// =============================================================================
+// TEST 18: Wrong-channel ACK and NACK are ignored
+// =============================================================================
+bool test_wrong_channel_ack_nack_ignored() {
+    LinkTransport sender(TransportNodeRole::GROUND);
+
+    uint8_t msg[] = {0x10, 0x20};
+    sender.start_transfer(TransportChannel::MAVLINK_UPLINK, msg, sizeof(msg), true);
+    uint8_t buf[TRANSPORT_MAX_FRAME_SIZE];
+    sender.get_next_tx_frame(buf, 1, 1000);
+
+    // 1. ACK targeting WRONG channel (DOWNLINK instead of UPLINK)
+    TransportHeader ack_hdr{};
+    ack_hdr.channel = (uint8_t)TransportChannel::LINK_CONTROL;
+    ack_hdr.payload_length = sizeof(TransportLinkAckNack);
+
+    TransportLinkAckNack an{};
+    an.subtype = (uint8_t)LinkSubtype::ACK_NACK;
+    an.target_channel = (uint8_t)TransportChannel::MAVLINK_DOWNLINK; // Wrong channel!
+    an.transfer_id = sender.get_tx_transfer_id();
+    an.fragment_offset = 0;
+    an.nack_reason = (uint8_t)TransportNackReason::NONE;
+
+    uint8_t payload[8];
+    transport_encode_link_ack_nack(&an, payload);
+
+    bool res = sender.ingest_transport_frame(ack_hdr, payload, sizeof(payload), 1010);
+    TEST_ASSERT(!res, "wrong channel ACK must be rejected");
+    TEST_ASSERT(sender.get_stats().acks_received == 0, "acks_received must be 0");
+    TEST_ASSERT(sender.is_tx_active(), "sender must remain active");
+
+    // 2. NACK targeting WRONG channel
+    an.nack_reason = (uint8_t)TransportNackReason::GAP_DETECTED;
+    transport_encode_link_ack_nack(&an, payload);
+
+    res = sender.ingest_transport_frame(ack_hdr, payload, sizeof(payload), 1015);
+    TEST_ASSERT(!res, "wrong channel NACK must be rejected");
+    TEST_ASSERT(sender.get_stats().nacks_received == 0, "nacks_received must be 0");
+    TEST_ASSERT(!sender.has_outgoing_frame(), "wrong channel NACK must not trigger retransmission");
+
+    std::cout << "  [PASS] test_wrong_channel_ack_nack_ignored" << std::endl;
+    return true;
+}
+
+// =============================================================================
+// TEST 19: Stale ACK after transfer completed is ignored
+// =============================================================================
+bool test_stale_ack_after_transfer_completed_ignored() {
+    LinkTransport sender(TransportNodeRole::GROUND);
+
+    uint8_t msg[] = {0x10, 0x20};
+    sender.start_transfer(TransportChannel::MAVLINK_UPLINK, msg, sizeof(msg), true);
+    uint8_t buf[TRANSPORT_MAX_FRAME_SIZE];
+    sender.get_next_tx_frame(buf, 1, 1000);
+
+    // Send valid matching ACK
+    TransportHeader ack_hdr{};
+    ack_hdr.channel = (uint8_t)TransportChannel::LINK_CONTROL;
+    ack_hdr.payload_length = sizeof(TransportLinkAckNack);
+
+    TransportLinkAckNack an{};
+    an.subtype = (uint8_t)LinkSubtype::ACK_NACK;
+    an.target_channel = (uint8_t)TransportChannel::MAVLINK_UPLINK;
+    an.transfer_id = sender.get_tx_transfer_id();
+    an.fragment_offset = 0;
+    an.nack_reason = (uint8_t)TransportNackReason::NONE;
+
+    uint8_t payload[8];
+    transport_encode_link_ack_nack(&an, payload);
+
+    bool res1 = sender.ingest_transport_frame(ack_hdr, payload, sizeof(payload), 1010);
+    TEST_ASSERT(res1, "first ACK must complete transfer");
+    TEST_ASSERT(!sender.is_tx_active(), "sender must be idle");
+    TEST_ASSERT(sender.get_stats().acks_received == 1, "acks_received should be 1");
+
+    // Now send the same ACK again (stale duplicate ACK after completion)
+    bool res2 = sender.ingest_transport_frame(ack_hdr, payload, sizeof(payload), 1015);
+    TEST_ASSERT(!res2, "stale ACK after transfer completed must be safely ignored");
+    TEST_ASSERT(sender.get_stats().acks_received == 1, "acks_received must still be 1");
+    TEST_ASSERT(!sender.is_tx_active(), "sender must remain idle");
+
+    std::cout << "  [PASS] test_stale_ack_after_transfer_completed_ignored" << std::endl;
+    return true;
+}
+
+// =============================================================================
 // MAIN ENTRY
 // =============================================================================
 int main() {
@@ -589,7 +783,7 @@ int main() {
     all_passed &= test_single_fragment_ack();
     all_passed &= test_multi_fragment_advances_only_after_ack();
     all_passed &= test_lost_fragment_causes_timeout_retry();
-    all_passed &= test_corrupted_frame_causes_crc_failure_and_nack();
+    all_passed &= test_corrupted_frame_causes_crc_rejection_and_timeout_retry();
     all_passed &= test_dropped_fragment_causes_gap_detected();
     all_passed &= test_duplicate_fragment_produces_ack_no_duplicate_delivery();
     all_passed &= test_nack_causes_retransmission();
@@ -601,10 +795,14 @@ int main() {
     all_passed &= test_reliable_mavlink_cannot_displace_rc();
     all_passed &= test_ack_frames_never_recursively_acked();
     all_passed &= test_failed_transfer_does_not_block_later_transfer();
+    all_passed &= test_nack_wrong_transfer_id_ignored();
+    all_passed &= test_nack_wrong_fragment_offset_ignored();
+    all_passed &= test_wrong_channel_ack_nack_ignored();
+    all_passed &= test_stale_ack_after_transfer_completed_ignored();
 
     std::cout << "===============================================================" << std::endl;
     if (all_passed) {
-        std::cout << "ALL 15 RELIABLE LINK TRANSPORT TESTS PASSED (100% SUCCESS)!" << std::endl;
+        std::cout << "ALL 19 RELIABLE LINK TRANSPORT TESTS PASSED (100% SUCCESS)!" << std::endl;
         std::cout << "===============================================================" << std::endl;
         return 0;
     } else {

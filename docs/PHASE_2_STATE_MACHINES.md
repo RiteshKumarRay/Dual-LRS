@@ -1,13 +1,13 @@
 # Dual-LRS Phase 2: Transport Layer State Machines
 
-**Document Version:** 1.2.0
-**Status:** Architecture and test state machines; production framing/reassembly is integrated, while ACK/NACK retry behavior remains incomplete
-**Date:** 2026-10-01
+**Document Version:** 1.3.0
+**Status:** Integrated LinkTransport reliable transport state machine (stop-and-wait lockstep, 200 ms RTO, 5-retry limit, duplicate re-ACK)
+**Date:** 2026-10-11
 **Project:** Dual-LRS
 
-The state machines below document the transport architecture and tested engine
-behavior. Current firmware uses the framing/fragmentation/reassembly path, but
-production ACK/NACK generation and retry scheduling remain incomplete.
+The state machines below document the transport architecture, tested engine
+behavior, and production LinkTransport implementation integrated into both
+Air and Ground firmware.
 
 ---
 

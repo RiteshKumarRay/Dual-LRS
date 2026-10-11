@@ -33,6 +33,8 @@ test_wps = [
     (int(19.0775 * 1e7), int(72.8780 * 1e7), 25.0),  # WP3
 ]
 
+all_passed = True
+
 for cycle in range(1, 11):
     print(f"\n>>> CYCLE {cycle}/10 <<<")
 
@@ -48,7 +50,9 @@ for cycle in range(1, 11):
             ack_clear = True
             break
     if not ack_clear:
-        print("    WARNING: Clear ACK timed out, proceeding anyway...")
+        print("    FAILED: Clear ACK timed out!")
+        all_passed = False
+        continue
 
     time.sleep(0.1)
 
@@ -88,6 +92,7 @@ for cycle in range(1, 11):
 
     if not upload_done:
         print(f"    FAILED: Upload timed out (sent items: {sorted(sent_items)})")
+        all_passed = False
         continue
 
     time.sleep(0.1)
@@ -131,7 +136,16 @@ for cycle in range(1, 11):
                 print(f"      WP#{seq}: lat={item.x/1e7:.5f}, lon={item.y/1e7:.5f}, alt={item.z:.1f}m -> {'MATCH' if ok else 'MISMATCH'}")
         if matched:
             print(f"    *** VERIFICATION PASSED: 100% integrity ***")
+        else:
+            all_passed = False
+            print(f"    *** VERIFICATION FAILED: Waypoint mismatch ***")
     else:
+        all_passed = False
         print(f"    FAILED: Expected {WP_COUNT}, got {len(downloaded)} items")
 
-print("\nBenchmark completed.")
+if all_passed:
+    print("\nBenchmark completed: ALL 10 CYCLES PASSED (100% SUCCESS)!")
+    sys.exit(0)
+else:
+    print("\nBenchmark completed with FAILURES!")
+    sys.exit(1)
