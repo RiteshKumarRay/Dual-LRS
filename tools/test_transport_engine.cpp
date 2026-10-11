@@ -573,6 +573,45 @@ bool test_rc_mailbox_and_failsafe() {
     return true;
 }
 
+bool test_failsafe_zero_timestamp_and_controls() {
+    TransportRcFailsafe failsafe(500);
+
+    TEST_ASSERT(!failsafe.has_valid_time(), "Initial has_valid_time must be false");
+    TEST_ASSERT(failsafe.get_state() == RcFailsafeState::NO_SIGNAL, "Initial state must be NO_SIGNAL");
+
+    // Arrival at timestamp 0 must be recorded and valid
+    failsafe.record_frame_arrival(0);
+    TEST_ASSERT(failsafe.has_valid_time(), "has_valid_time must be true at t=0");
+    TEST_ASSERT(failsafe.get_last_valid_time_ms() == 0, "last_valid_time_ms must be 0");
+    TEST_ASSERT(failsafe.get_state() == RcFailsafeState::ACTIVE, "State must be ACTIVE at t=0");
+
+    // Advance to t = 50 ms (dt = 50 ms <= 500 ms)
+    failsafe.update(50);
+    TEST_ASSERT(failsafe.get_state() == RcFailsafeState::ACTIVE, "State must remain ACTIVE at t=50 ms from t=0");
+
+    // Advance to t = 501 ms (dt = 501 ms > 500 ms)
+    failsafe.update(501);
+    TEST_ASSERT(failsafe.is_failsafe_active(), "State must be FAILSAFE at t=501 ms from t=0");
+
+    // Test force_active, force_failsafe, reset_recovery
+    failsafe.force_active(600);
+    TEST_ASSERT(!failsafe.is_failsafe_active(), "force_active must clear failsafe");
+    TEST_ASSERT(failsafe.get_state() == RcFailsafeState::ACTIVE, "State must be ACTIVE after force_active");
+    TEST_ASSERT(failsafe.get_last_valid_time_ms() == 600, "last_valid_time_ms mismatch after force_active");
+
+    failsafe.force_failsafe();
+    TEST_ASSERT(failsafe.is_failsafe_active(), "force_failsafe must set failsafe");
+    TEST_ASSERT(failsafe.get_consecutive_valid_frames() == 0, "consecutive_valid_frames must be 0");
+
+    failsafe.record_frame_arrival(700);
+    TEST_ASSERT(failsafe.get_consecutive_valid_frames() == 1, "consecutive frames must be 1");
+    failsafe.reset_recovery();
+    TEST_ASSERT(failsafe.get_consecutive_valid_frames() == 0, "reset_recovery must clear consecutive frames to 0");
+
+    std::cout << "  [PASS] test_failsafe_zero_timestamp_and_controls\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Running Comprehensive TransportEngine Unit Tests ===\n";
     bool ok = true;
@@ -585,6 +624,7 @@ int main() {
     ok &= test_reassembler_sequential_transfers_and_lifecycle();
     ok &= test_retry_manager();
     ok &= test_rc_mailbox_and_failsafe();
+    ok &= test_failsafe_zero_timestamp_and_controls();
 
     if (ok) {
         std::cout << "=== ALL TRANSPORT ENGINE TESTS PASSED ===\n";

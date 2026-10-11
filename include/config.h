@@ -119,7 +119,11 @@
 #define TDM_PROFILE_50MS_20HZ   2
 
 #ifndef DUAL_LRS_TDM_PROFILE
-#define DUAL_LRS_TDM_PROFILE    TDM_PROFILE_70MS_14HZ
+// The 25 ms Air slot in the 70 ms profile is shorter than the measured
+// on-air/transparent-UART completion time of a maximum 64-byte transport
+// frame. Keep the conservative 90 ms profile as the safe default until an
+// airtime-aware scheduler is implemented and measured on the deployed radios.
+#define DUAL_LRS_TDM_PROFILE    TDM_PROFILE_90MS_11HZ
 #endif
 
 #if (DUAL_LRS_TDM_PROFILE == TDM_PROFILE_50MS_20HZ)

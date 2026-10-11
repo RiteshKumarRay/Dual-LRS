@@ -22,7 +22,11 @@ image/
 *.a
 *.so
 *.dylib
-tools/test_transport_protocol_cpp
+# Native test executables are created beside their source by some local
+# commands; keep source files while ignoring extensionless build outputs.
+tools/test_*
+!tools/test_*.cpp
+!tools/test_*.py
 
 # Temporary benchmark outputs and logs
 bench_params.json

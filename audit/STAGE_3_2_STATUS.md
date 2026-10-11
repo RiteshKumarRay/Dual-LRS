@@ -3,13 +3,14 @@
 ## Scope
 
 This report records the current implementation and verification state of the
-Dual-LRS Stage 3.2 development mode. It does not authorize flight testing and
-does not claim that missions, parameters, or commands are production-reliable.
+Dual-LRS Stage 3.2 development mode. Mission upload/download and full
+parameter download have now been live bench verified with propellers removed;
+this does not authorize flight testing or claim packet-loss reliability.
 
 ## Verified
 
-- Stage 3.2 remains opt-in. The default production configuration keeps
-  `DUAL_LRS_STAGE31_RC_ONLY=1`.
+- Stage 3.2 MAVLink mode is enabled by the current default
+  `DUAL_LRS_STAGE31_RC_ONLY=0`; RC safety handling remains active in that mode.
 - The native `test_production_mavlink_transport` target explicitly builds with
   `DUAL_LRS_STAGE31_RC_ONLY=0`.
 - A single-burst MAVLink packet is transported and delivered without mutation.
@@ -21,10 +22,11 @@ does not claim that missions, parameters, or commands are production-reliable.
 - Oversized single-burst payloads are rejected rather than silently truncated.
 - RC transmission is not disabled merely because Stage 3.2 MAVLink mode is
   enabled.
-- The production Ground scheduler reserves a fresh RC frame whenever one is
-  available. Ground-to-Air MAVLink no longer intentionally replaces a valid RC
-  frame. A compile-time opt-out exists only for controlled scheduler experiments
-  and must not be used for flight firmware.
+- The production Ground scheduler gives RC priority while boundedly
+  interleaving Ground-to-Air MAVLink. Mission traffic can use approximately
+  every second eligible Ground cycle; normal GCS traffic is less frequent. A
+  compile-time opt-out exists only for controlled scheduler experiments and
+  must not be used for flight firmware.
 - The production firmware and diagnostic build matrix compiles:
   `dual_lrs_air`, `dual_lrs_ground`, `dual_lrs_ground_esp32`, `diag_air`,
   `diag_ground_esp32`, `test_air_crsf_uart`, and
@@ -33,6 +35,9 @@ does not claim that missions, parameters, or commands are production-reliable.
   Python transport tests (25/25), transport protocol tests, transport-engine
   tests, CRSF tests including the 4,096-case CH1/CH2 independence sweep, and
   all production RC dispatch tests.
+- Live propellers-off Radxa/ArduPilot validation confirmed RC present/healthy,
+  stable RC failsafe state, approximately 20 Hz FC-side RC output pacing,
+  mission upload/download, and complete parameter download.
 
 ## Important interpretation
 
@@ -57,8 +62,9 @@ transparent channel-number bridge.
    completion acknowledgement and retry behavior.
 4. Add production-path tests for packet loss, duplicates, overlap conflicts,
    gaps, timeout, retry exhaustion, and reconnection.
-5. Add parameter read/write, command acknowledgement, and mission
-   upload/download tests against a real or faithful flight-controller endpoint.
+5. Add repeated parameter read/write, command acknowledgement, and mission
+   upload/download tests under packet loss against a real or faithful
+   flight-controller endpoint.
 6. Test queue backpressure and confirm RC latency and failsafe behavior while
    MAVLink traffic is saturated.
 7. Validate the approximately 11.1 Hz RC input rate and FC failsafe settings
@@ -66,8 +72,8 @@ transparent channel-number bridge.
 8. Repeat all tests with real E22 modules and then perform controlled,
    propellers-off bench tests before any flight.
 
-Until these blockers are closed, Stage 3.2 should remain a development/test
-configuration and the default RC-only mode should not be changed.
+Until these blockers are closed, Stage 3.2 should remain a bench-validated
+development/test configuration and must not be treated as flight-authorized.
 
 ## RC rate interpretation
 

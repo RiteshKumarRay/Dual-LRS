@@ -515,16 +515,18 @@ void TransportRcMailbox::read_channels(uint16_t* out_channels, uint8_t* out_sequ
 // =============================================================================
 
 TransportRcFailsafe::TransportRcFailsafe(uint32_t timeout_ms)
-    : timeout_ms_(timeout_ms), last_valid_time_ms_(0),
+    : timeout_ms_(timeout_ms), has_valid_time_(false), last_valid_time_ms_(0),
       consecutive_valid_frames_(0), state_(RcFailsafeState::NO_SIGNAL) {}
 
 void TransportRcFailsafe::reset() {
+    has_valid_time_ = false;
     last_valid_time_ms_ = 0;
     consecutive_valid_frames_ = 0;
     state_ = RcFailsafeState::NO_SIGNAL;
 }
 
 void TransportRcFailsafe::record_frame_arrival(uint32_t current_time_ms) {
+    has_valid_time_ = true;
     last_valid_time_ms_ = current_time_ms;
     consecutive_valid_frames_++;
 
@@ -538,7 +540,7 @@ void TransportRcFailsafe::record_frame_arrival(uint32_t current_time_ms) {
 }
 
 void TransportRcFailsafe::update(uint32_t current_time_ms) {
-    if (last_valid_time_ms_ == 0) {
+    if (!has_valid_time_) {
         state_ = RcFailsafeState::NO_SIGNAL;
         return;
     }
@@ -550,4 +552,20 @@ void TransportRcFailsafe::update(uint32_t current_time_ms) {
     } else if (elapsed > 100 && state_ == RcFailsafeState::ACTIVE) {
         state_ = RcFailsafeState::DEGRADED;
     }
+}
+
+void TransportRcFailsafe::force_failsafe() {
+    state_ = RcFailsafeState::FAILSAFE;
+    consecutive_valid_frames_ = 0;
+}
+
+void TransportRcFailsafe::force_active(uint32_t current_time_ms) {
+    has_valid_time_ = true;
+    last_valid_time_ms_ = current_time_ms;
+    consecutive_valid_frames_ = TRANSPORT_RC_RESTORE_FRAME_COUNT;
+    state_ = RcFailsafeState::ACTIVE;
+}
+
+void TransportRcFailsafe::reset_recovery() {
+    consecutive_valid_frames_ = 0;
 }

@@ -280,16 +280,6 @@ void setup() {
         SerialAirCRSF.setRx(PIN_AIR_CRSF_RX);
         SerialAirCRSF.setTx(PIN_AIR_CRSF_TX);
         SerialAirCRSF.begin(AIR_CRSF_BAUD);
-
-        // Emit an initial sync burst of CRSF frames so Flight Controller detects receiver immediately
-        uint8_t init_buf[CRSF_FRAME_RC_TOTAL_SIZE];
-        size_t init_len = rcAirAdapter.get_fc_frame(init_buf);
-        if (init_len > 0) {
-            for (int i = 0; i < 5; ++i) {
-                SerialAirCRSF.write(init_buf, init_len);
-                delay(2);
-            }
-        }
     #endif
 
     tdm.onPacketReceived(onRadioPacketReceived);
@@ -306,12 +296,6 @@ void loop() {
     static uint8_t rawRing[32] = {0};
     static uint8_t rawRingIdx = 0;
     static uint32_t lastByteUs = 0;
-
-    // Send CRSF handshake reply if radio is pinging or we do not have handset lock yet
-    if (!rcGroundAdapter.has_handset_signal(now) && (now - lastPingReplyMs >= 200)) {
-        lastPingReplyMs = now;
-        sendCrsfDeviceInfoReply(SCAN_PROFILES[currentScanIdx].baud);
-    }
 
     while (Serial1.available() > 0) {
         uint32_t nowUs = micros();
@@ -495,7 +479,7 @@ void loop() {
 
     if (inMySlot) {
         if (!sentThisSlot) {
-            sentThisSlot = true; // Exactly 1 attempt per 90ms cycle to prevent slot spill
+            sentThisSlot = true; // Exactly 1 attempt per TDM cycle to prevent slot spill
             bool ok = false;
             lastTxStartUs = micros();
 
@@ -552,12 +536,12 @@ void loop() {
                 }
 #endif
             } else {
-                // CURRENT_ROLE == NodeRole::AIR (Air slot: 45 ms)
+                // CURRENT_ROLE == NodeRole::AIR (Air slot depends on TDM profile)
 #if defined(DUAL_LRS_ROLE_AIR)
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
                 // Stage 3.2 MAVLink Downlink Telemetry (Air -> Ground)
                 if (!airDownlinkFragmenter.has_next_fragment()) {
-                    size_t pkt_len = telemHandler.getOutboundPacket(airTxMsgBuf, sizeof(airTxMsgBuf));
+                    size_t pkt_len = telemHandler.getNormalTelemetryPayload(airTxMsgBuf, sizeof(airTxMsgBuf));
                     if (pkt_len > 0) {
                         airDownlinkFragmenter.start_transfer(TransportChannel::MAVLINK_DOWNLINK, airTxMsgBuf, (uint16_t)pkt_len, false);
                     }

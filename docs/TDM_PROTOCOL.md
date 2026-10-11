@@ -1,5 +1,11 @@
 # Dual-LRS TDM (Time Division Multiplexing) Protocol Specification
 
+> **Current implementation:** The deployed default is the conservative 90 ms
+> schedule documented below. The Air CRSF output may be paced locally at 50 Hz,
+> but fresh RF RC delivery is limited by the 90 ms Ground slot cycle. Normal
+> MAVLink aggregation is bounded to complete frames that fit within the 49-byte
+> transport payload; it does not permit a second RF frame in the Air slot.
+
 Because LoRa transceivers (Semtech SX1262 / Ebyte E22-900T30D) operate on a single RF carrier frequency, physical transmission is **half-duplex** (the module can only transmit or receive at any given instant).
 
 To achieve simultaneous, deterministic, low-latency control and bidirectional telemetry between the Ground Control Station (QGroundControl / Mission Planner), the RC Handset, and the drone's Flight Controller (ArduPilot), Dual-LRS implements a deterministic **Time Division Multiplexing (TDM)** frame scheduler disciplined by a graduated Phase-Locked Loop (PLL).

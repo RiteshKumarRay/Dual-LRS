@@ -19,16 +19,19 @@ Connect your flight controller to your GCS via USB, navigate to **Full Parameter
 
 ### Recommended Telemetry Stream Rates (Hz)
 
-To optimize bandwidth over the half-duplex LoRa link, configure the stream rate parameters (replace `SR1_` with `SR2_` if using TELEM2):
+To match the current half-duplex LoRa budget, use conservative stream rates
+(replace `SR1_` with `SR2_` if using TELEM2). The firmware suppresses
+background telemetry during mission and parameter transfers, then resumes the
+normal stream after completion.
 
 | Parameter | Value | Description |
 | :--- | :---: | :--- |
-| **SR1_POSITION** | `3` to `5` | GPS coordinates, groundspeed, altitude (3–5 Hz) |
-| **SR1_EXTRA1** | `5` to `10` | Attitude (Roll, Pitch, Yaw) for HUD horizon (5–10 Hz) |
-| **SR1_EXTRA2** | `3` to `5` | VFR HUD (Heading, throttle, climb rate) (3–5 Hz) |
-| **SR1_EXTRA3** | `2` | Battery voltage, current, power sensors (2 Hz) |
+| **SR1_POSITION** | `2` | GPS coordinates, groundspeed, altitude |
+| **SR1_EXTRA1** | `4` | Attitude (Roll, Pitch, Yaw) for HUD horizon |
+| **SR1_EXTRA2** | `2` | VFR HUD (Heading, throttle, climb rate) |
+| **SR1_EXTRA3** | `1` | Battery voltage, current, power sensors |
 | **SR1_RAW_SENS** | `1` | Raw IMU sensors (1 Hz) |
-| **SR1_RC_CHAN** | `2` | RC channel inputs (2 Hz) |
+| **SR1_RC_CHAN** | `1` | RC channel inputs |
 
 ---
 

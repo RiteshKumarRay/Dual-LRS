@@ -1,5 +1,10 @@
 # Phase 2: Transport Protocol, Engine & RC Pipeline — Verification Report (Corrected Baseline)
 
+> **Historical transition report:** This document captures the Phase 2 point
+> in time when production integration was still pending. Current production
+> framing, fragmentation, reassembly, mission/parameter gating, and live
+> verification status are documented in `docs/CURRENT_STATUS.md`.
+
 **Date:** 2026-10-01
 **Project:** Dual-LRS (Air: STM32F411 BlackPill, Ground: ESP32-WROOM-32)
 **Status:** `PHASE 2 ISOLATED IMPLEMENTATION & HOST VERIFICATION PASSED — LIVE SMOKE TEST RECORDED (AUDIT BASELINE)`

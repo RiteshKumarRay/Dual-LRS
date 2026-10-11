@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include "config.h"
+#include "transport_protocol.h"
 
 // Ring buffer for high-throughput MAVLink buffering
 class RingBuffer {
@@ -52,10 +53,18 @@ public:
     // Pull an intact, complete MAVLink packet for Phase 2 transport fragmentation
     size_t getOutboundPacket(uint8_t* dest, size_t maxPacketLen);
 
+    // Pull an aggregated, bounded payload of complete MAVLink telemetry frames
+    // for normal Air-to-Ground downlink. Concatenates multiple complete frames
+    // only if the combined length fits within maxPayloadLen (capped at
+    // TRANSPORT_MAX_SINGLE_BURST_PAYLOAD = 49 bytes).
+    size_t getNormalTelemetryPayload(uint8_t* dest, size_t maxPayloadLen);
+
     // Feed inbound payload received from radio into local port (FC or GCS).
     // On Ground unit: runs a MAVLink parser so RADIO_STATUS is only injected
     // between complete frames — never mid-packet (prevents stream corruption).
     void writeToLocal(const uint8_t* src, size_t length);
+    void writeToLocalAir(const uint8_t* src, size_t length);
+    void writeToLocalGround(const uint8_t* src, size_t length);
 
     // Directly push bytes into outbound queue
     bool pushByte(uint8_t b);
@@ -80,8 +89,9 @@ public:
         _paramDownloadActive = true;
         _lastParamRxMs = millis();
     }
-    bool isMissionActive() const {
-        return _missionTransferActive && (millis() - _lastMissionIngestMs < 2500);
+    bool isMissionActive() const { return _missionTransferActive; }
+    bool isTelemetrySuppressed() const {
+        return _missionTransferActive || _paramDownloadActive;
     }
     uint32_t rawBytesRead() const { return _rawBytesRead; }
 
@@ -94,6 +104,7 @@ private:
     uint32_t _validParamValues = 0;
     uint32_t _lastParamRxMs = 0;
     bool     _paramDownloadActive = false;
+    bool     _paramListActive = false;
     bool     _missionTransferActive = false;
     uint32_t _lastLocalByteMs = 0;
     uint32_t _lastSysStatusMs = 0;   // SYS_STATUS  (msgid 1)   — battery
@@ -138,6 +149,10 @@ private:
     MavlinkOutputCallback _outputCallback = nullptr;
     void _outputToLocal(const uint8_t* buf, size_t len);
     void parseByte(uint8_t c);
+    void observeMavlinkPacket(const uint8_t* packet, size_t len);
+    void observeMavlinkMessage(uint32_t msgid, const uint8_t* packet, size_t len);
+    bool isSuppressedTelemetry(uint32_t msgid) const;
+    void dropSuppressedTelemetryAtQueueHead();
 
     // Internal: write raw bytes to _localSerial (used by both Air and Ground)
     void _writeRaw(const uint8_t* buf, size_t len);

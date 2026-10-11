@@ -1,5 +1,11 @@
 # Dual-LRS Engineering Approach
 
+> **Current implementation note:** This document contains the original
+> engineering contract and staged requirements. The current deployed baseline
+> uses a measured 90 ms TDM cycle (`32/5/45/8` ms), approximately 11.1 Hz
+> fresh RF RC delivery, and 50 Hz local Air CRSF pacing. See
+> [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md) for current results.
+
 ## Purpose
 
 This document is the implementation contract for Dual-LRS.
@@ -353,7 +359,8 @@ Ground RC frame requirements:
 Start conservatively:
 
 - 8 channels at full required resolution
-- 20 Hz update rate
+- Approximately 11.1 Hz fresh RF update rate in the current 90 ms baseline;
+  20 Hz remains a future measured target
 - Explicit mapping table
 - Fixed reserved TDM capacity
 
@@ -430,10 +437,10 @@ transition.
 
 The E22 is half-duplex and opaque. TDM timing must be based on measurement.
 
-Initial schedule may be:
+The original design proposal used the following initial schedule:
 
 ```text
-50 ms frame / 20 Hz
+50 ms frame / 20 Hz (historical proposal; not the current default)
 
 Air → Ground slot
 Guard gap
@@ -441,8 +448,9 @@ Ground → Air slot
 Guard gap
 ```
 
-The exact slot widths are not permanent until measured. Documentation,
-configuration, and tests must use the same values.
+The current measured/default schedule is 90 ms total with `32/5/45/8` ms
+Ground, guard, Air, and guard intervals. Documentation, configuration, and
+tests must use the same values.
 
 Rules:
 

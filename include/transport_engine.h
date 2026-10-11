@@ -269,8 +269,15 @@ public:
     RcFailsafeState get_state() const { return state_; }
     uint32_t get_consecutive_valid_frames() const { return consecutive_valid_frames_; }
 
+    bool has_valid_time() const { return has_valid_time_; }
+    uint32_t get_last_valid_time_ms() const { return last_valid_time_ms_; }
+    void force_failsafe();
+    void force_active(uint32_t current_time_ms);
+    void reset_recovery();
+
 private:
     uint32_t timeout_ms_;
+    bool has_valid_time_;
     uint32_t last_valid_time_ms_;
     uint32_t consecutive_valid_frames_;
     RcFailsafeState state_;

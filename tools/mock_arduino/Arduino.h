@@ -28,7 +28,18 @@ extern uint32_t g_mock_millis;
 inline uint32_t micros() { return g_mock_micros; }
 inline uint32_t millis() { return g_mock_millis; }
 
-class HardwareSerial {
+class Stream {
+public:
+    virtual ~Stream() = default;
+    virtual int available() = 0;
+    virtual int read() = 0;
+    virtual size_t write(const uint8_t* data, size_t length) = 0;
+};
+
+class HardwareSerial : public Stream {
 public:
     void begin(uint32_t) {}
+    int available() override { return 0; }
+    int read() override { return -1; }
+    size_t write(const uint8_t*, size_t length) override { return length; }
 };

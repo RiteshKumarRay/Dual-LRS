@@ -1,5 +1,10 @@
 # Dual-LRS Phase 0 Baseline Audit & Hygiene Report (v2 — Senior Review Revisions Applied)
 
+> **Historical document:** This report records the Phase 0 baseline. Its
+> legacy 50 ms/proposed-transport claims are superseded by the current
+> integrated implementation and `docs/CURRENT_STATUS.md`; the original
+> observations are retained as audit evidence.
+
 **Date:** October 1, 2026
 **Scope:** Phase 0 Baseline Audit and Hygiene as mandated by `approach.md`
 **Working Directory:** `/home/ritesh/Desktop/Dual-LRS`

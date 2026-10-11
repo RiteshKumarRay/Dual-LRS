@@ -325,8 +325,9 @@ bool test_handset_timeout_and_beacon_fallback() {
 // Verifies:
 // 1. Loss of RF uplink triggers failsafe at 500ms.
 // 2. While in failsafe, CRSF frames to FC are completely suppressed (0 bytes).
-// 3. Frame 1 & Frame 2 do NOT clear failsafe.
-// 4. Frame 3 clears failsafe and restores 26B CRSF output to FC.
+// 3. The first candidate establishes a baseline; three advancing frames are
+//    required before failsafe clears.
+// 4. The third advancing frame restores 26B CRSF output to FC.
 // =============================================================================
 bool test_failsafe_watchdog_and_three_frame_restore() {
     reset_rf_bus();
@@ -365,7 +366,7 @@ bool test_failsafe_watchdog_and_three_frame_restore() {
     TEST_ASSERT(air_adapter.get_fc_frame(fc_buf) == 0, "No pulses during failsafe");
     TEST_ASSERT(air_adapter.get_stats().failsafe_events == 1, "failsafe_events must increment to 1");
 
-    // 3. Restoration Frame 1 at t = 2590ms (+89ms): failsafe still active
+    // 3. Restoration baseline at t = 2590ms (+89ms): failsafe still active
     advance_mock_time_ms(89);
     prc.rc_sequence = 2;
     air_adapter.ingest_rc_frame(prc, g_mock_millis);
@@ -373,7 +374,7 @@ bool test_failsafe_watchdog_and_three_frame_restore() {
     TEST_ASSERT(air_adapter.is_failsafe_active(), "Failsafe must remain active on restore frame 1");
     TEST_ASSERT(air_adapter.get_fc_frame(fc_buf) == 0, "No pulses on restore frame 1");
 
-    // 4. Restoration Frame 2 at t = 2680ms (+90ms): failsafe still active
+    // 4. Restoration advancing frame 1 at t = 2680ms (+90ms): failsafe still active
     advance_mock_time_ms(90);
     prc.rc_sequence = 3;
     air_adapter.ingest_rc_frame(prc, g_mock_millis);
@@ -381,14 +382,22 @@ bool test_failsafe_watchdog_and_three_frame_restore() {
     TEST_ASSERT(air_adapter.is_failsafe_active(), "Failsafe must remain active on restore frame 2");
     TEST_ASSERT(air_adapter.get_fc_frame(fc_buf) == 0, "No pulses on restore frame 2");
 
-    // 5. Restoration Frame 3 at t = 2770ms (+90ms): 3 consecutive frames achieved!
+    // 5. Restoration advancing frame 2 at t = 2770ms (+90ms): still failsafe
     advance_mock_time_ms(90);
     prc.rc_sequence = 4;
     air_adapter.ingest_rc_frame(prc, g_mock_millis);
 
-    TEST_ASSERT(!air_adapter.is_failsafe_active(), "Failsafe must clear on restore frame 3");
+    TEST_ASSERT(air_adapter.is_failsafe_active(), "Failsafe must remain after only 2 advancing frames");
+    TEST_ASSERT(air_adapter.get_fc_frame(fc_buf) == 0, "CRSF pulses must remain suppressed after 2 advancing frames");
+
+    // 6. Restoration advancing frame 3 at t = 2860ms (+90ms): clear failsafe
+    advance_mock_time_ms(90);
+    prc.rc_sequence = 5;
+    air_adapter.ingest_rc_frame(prc, g_mock_millis);
+
+    TEST_ASSERT(!air_adapter.is_failsafe_active(), "Failsafe must clear on the third advancing restore frame");
     TEST_ASSERT(air_adapter.get_stats().restore_events == 1, "restore_events must increment to 1");
-    TEST_ASSERT(air_adapter.get_fc_frame(fc_buf) == 26, "CRSF pulses must immediately resume on restore frame 3");
+    TEST_ASSERT(air_adapter.get_fc_frame(fc_buf) == 26, "CRSF pulses must immediately resume on the third advancing restore frame");
 
     std::cout << "  [PASS] test_failsafe_watchdog_and_three_frame_restore\n";
     return true;

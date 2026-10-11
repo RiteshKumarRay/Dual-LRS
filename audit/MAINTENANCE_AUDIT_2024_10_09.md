@@ -1,5 +1,10 @@
 # Dual-LRS Project Audit & Maintenance Report
 
+> **Historical maintenance snapshot:** The 50 ms/20 Hz profile discussed in
+> this dated audit is not the current default. The current baseline is a 90 ms
+> cycle with approximately 11.1 Hz fresh RF RC delivery and 50 Hz local Air
+> CRSF pacing. Preserve this report as historical evidence.
+
 **Date:** October 9, 2024  
 **Reporter:** Senior RF UAV Systems Engineer Review  
 **Session:** Comprehensive Project Hygiene & Configuration Alignment

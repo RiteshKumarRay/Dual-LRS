@@ -246,35 +246,146 @@ private:
 // -----------------------------------------------------------------------------
 class RcAirAdapter {
 public:
-    RcAirAdapter() : has_channels_(true), has_new_frame_(false), was_failsafe_(false), last_valid_time_ms_(0), stats_{} {
-        for (size_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
-            last_channels_[i] = (i == 2) ? CRSF_CHANNEL_VALUE_MIN : CRSF_CHANNEL_VALUE_MID;
-        }
+    RcAirAdapter()
+        : mailbox_{}, failsafe_{}, has_channels_(false), has_new_frame_(false),
+          was_failsafe_(false), has_valid_time_(false), last_valid_time_ms_(0),
+          stats_{}, has_committed_seq_(false), committed_seq_(0),
+          restore_count_(0), candidate_seq_(0), has_candidate_time_(false),
+          candidate_time_ms_(0) {
+        memset(last_channels_, 0, sizeof(last_channels_));
+        memset(candidate_channels_, 0, sizeof(candidate_channels_));
     }
 
     // Ingests verified RC_CONTROL frame from TransportParser
     bool ingest_rc_frame(const TransportPackedRc& packed_rc, uint32_t current_time_ms) {
-        stats_.rf_frames_received++;
+        // 1. Evaluate timeout before processing ingress. A malformed or rejected
+        // frame must not prevent an already-expired link from entering failsafe.
+        if (has_valid_time_) {
+            uint32_t elapsed = current_time_ms - last_valid_time_ms_;
+            if (elapsed > TRANSPORT_RC_FAILSAFE_TIMEOUT_MS) {
+                failsafe_.force_failsafe();
+                has_committed_seq_ = false;
+                if (!was_failsafe_) {
+                    stats_.failsafe_events++;
+                    was_failsafe_ = true;
+                }
+                if (has_candidate_time_ &&
+                    current_time_ms - candidate_time_ms_ > TRANSPORT_RC_FAILSAFE_TIMEOUT_MS) {
+                    restore_count_ = 0;
+                    has_candidate_time_ = false;
+                    failsafe_.reset_recovery();
+                }
+            }
+        }
+
+        // 2. Structural unpack verification
+        uint16_t unpacked[CRSF_NUM_CHANNELS];
+        if (!crsf_unpack_channels22(packed_rc.channels, unpacked)) {
+            return false;
+        }
+
+        RcFailsafeState state = failsafe_.get_state();
+
+        // 3. Process according to current state
+        if (state == RcFailsafeState::NO_SIGNAL) {
+            // Initial acquisition: accept first structurally valid frame
+            memcpy(last_channels_, unpacked, sizeof(last_channels_));
+            has_channels_ = true;
+            committed_seq_ = packed_rc.rc_sequence;
+            has_committed_seq_ = true;
+            has_valid_time_ = true;
+            last_valid_time_ms_ = current_time_ms;
+            stats_.rf_frames_received++;
+            has_new_frame_ = true;
+            mailbox_.update_from_wire(reinterpret_cast<const uint8_t*>(&packed_rc));
+            failsafe_.record_frame_arrival(current_time_ms);
+            was_failsafe_ = failsafe_.is_failsafe_active();
+            return true;
+        }
+
+        if (state == RcFailsafeState::FAILSAFE) {
+            // Check candidate expiration (500ms software policy)
+            if (has_candidate_time_) {
+                if (current_time_ms - candidate_time_ms_ > TRANSPORT_RC_FAILSAFE_TIMEOUT_MS) {
+                    restore_count_ = 0;
+                    has_candidate_time_ = false;
+                    failsafe_.reset_recovery();
+                }
+            }
+
+            if (!has_candidate_time_) {
+                // First candidate frame establishes the baseline. It is not one
+                // of the advancing frames required for restoration.
+                candidate_seq_ = packed_rc.rc_sequence;
+                candidate_time_ms_ = current_time_ms;
+                has_candidate_time_ = true;
+                restore_count_ = 0;
+                memcpy(candidate_channels_, unpacked, sizeof(candidate_channels_));
+                stats_.rf_frames_received++;
+                mailbox_.update_from_wire(reinterpret_cast<const uint8_t*>(&packed_rc));
+                // Output remains suppressed; committed channels untouched
+                return true;
+            }
+
+            // Later candidate frames: evaluate delta against the baseline.
+            uint8_t delta = (uint8_t)(packed_rc.rc_sequence - candidate_seq_);
+            if (delta == 0 || delta >= 128) {
+                // delta 0 or delta >= 128 rejects the frame and resets candidate state.
+                // Rejected frames do not change candidate timestamp or committed channels.
+                restore_count_ = 0;
+                has_candidate_time_ = false;
+                failsafe_.reset_recovery();
+                return false;
+            }
+
+            // delta in 1..127 advances candidate state
+            candidate_seq_ = packed_rc.rc_sequence;
+            candidate_time_ms_ = current_time_ms;
+            has_candidate_time_ = true;
+            restore_count_++;
+            memcpy(candidate_channels_, unpacked, sizeof(candidate_channels_));
+            stats_.rf_frames_received++;
+            mailbox_.update_from_wire(reinterpret_cast<const uint8_t*>(&packed_rc));
+
+            if (restore_count_ == TRANSPORT_RC_RESTORE_FRAME_COUNT) {
+                // Three accepted advancing candidate frames: atomically commit.
+                memcpy(last_channels_, candidate_channels_, sizeof(last_channels_));
+                committed_seq_ = candidate_seq_;
+                has_committed_seq_ = true;
+                failsafe_.force_active(current_time_ms);
+                was_failsafe_ = false;
+                stats_.restore_events++;
+                has_valid_time_ = true;
+                last_valid_time_ms_ = current_time_ms;
+                restore_count_ = 0;
+                has_candidate_time_ = false;
+                has_new_frame_ = true;
+            }
+            return true;
+        }
+
+        // Active stream: ACTIVE or DEGRADED
+        // Evaluate delta against committed sequence
+        uint8_t delta = (uint8_t)(packed_rc.rc_sequence - committed_seq_);
+        if (delta == 0 || delta >= 128) {
+            // delta == 0: reject duplicate.
+            // delta >= 128: reject stale / ambiguous.
+            // Rejected frames must not update channels, watchdog timestamps, or restoration state.
+            return false;
+        }
+
+        // delta in 1..127: accept
+        committed_seq_ = packed_rc.rc_sequence;
+        memcpy(last_channels_, unpacked, sizeof(last_channels_));
+        has_channels_ = true;
+        has_new_frame_ = true;
+        has_valid_time_ = true;
         last_valid_time_ms_ = current_time_ms;
+        stats_.rf_frames_received++;
         mailbox_.update_from_wire(reinterpret_cast<const uint8_t*>(&packed_rc));
         failsafe_.record_frame_arrival(current_time_ms);
         failsafe_.update(current_time_ms);
-
-        if (failsafe_.is_failsafe_active() != was_failsafe_) {
-            if (failsafe_.is_failsafe_active()) {
-                stats_.failsafe_events++;
-            } else {
-                stats_.restore_events++;
-            }
-            was_failsafe_ = failsafe_.is_failsafe_active();
-        }
-
-        if (crsf_unpack_channels22(packed_rc.channels, last_channels_)) {
-            has_channels_ = true;
-            has_new_frame_ = true;
-            return true;
-        }
-        return false;
+        return true;
     }
 
     // Periodic tick to check for RC timeout
@@ -283,24 +394,35 @@ public:
         if (failsafe_.is_failsafe_active() != was_failsafe_) {
             if (failsafe_.is_failsafe_active()) {
                 stats_.failsafe_events++;
+                has_committed_seq_ = false;
+                restore_count_ = 0;
+                has_candidate_time_ = false;
             } else {
                 stats_.restore_events++;
             }
             was_failsafe_ = failsafe_.is_failsafe_active();
         }
+
+        // Candidate timeout check during FAILSAFE (500ms software policy)
+        if (failsafe_.is_failsafe_active() && has_candidate_time_) {
+            if (current_time_ms - candidate_time_ms_ > TRANSPORT_RC_FAILSAFE_TIMEOUT_MS) {
+                restore_count_ = 0;
+                has_candidate_time_ = false;
+                failsafe_.reset_recovery();
+            }
+        }
     }
 
-    // Formats a 26-byte CRSF frame for the Flight Controller.
-    // Transmits live stick positions or safe failsafe defaults (throttle low, sticks centered).
+    // Formats a 26-byte CRSF RC channel frame for the Flight Controller.
+    // Suppresses CRSF RC channel frames (returns 0) when output buffer is null,
+    // no valid channels have been accepted, or link is in NO_SIGNAL / FAILSAFE.
+    // Emits accepted channel frames only when link state is ACTIVE or DEGRADED.
     size_t get_fc_frame(uint8_t* out_frame26) {
         if (!out_frame26 || !has_channels_) return 0;
 
-        if (failsafe_.is_failsafe_active()) {
-            uint16_t fs_channels[CRSF_NUM_CHANNELS];
-            for (size_t i = 0; i < CRSF_NUM_CHANNELS; ++i) {
-                fs_channels[i] = (i == 2) ? CRSF_CHANNEL_VALUE_MIN : CRSF_CHANNEL_VALUE_MID;
-            }
-            return crsf_encode_rc_frame(CRSF_ADDRESS_FLIGHT_CONTROLLER, fs_channels, out_frame26);
+        RcFailsafeState st = failsafe_.get_state();
+        if (st != RcFailsafeState::ACTIVE && st != RcFailsafeState::DEGRADED) {
+            return 0;
         }
 
         return crsf_encode_rc_frame(CRSF_ADDRESS_FLIGHT_CONTROLLER, last_channels_, out_frame26);
@@ -312,6 +434,12 @@ public:
     const uint16_t* get_channels() const { return last_channels_; }
     const RcAdapterStats& get_stats() const { return stats_; }
     uint32_t get_last_valid_time_ms() const { return last_valid_time_ms_; }
+    bool has_valid_time() const { return has_valid_time_; }
+    bool has_committed_seq() const { return has_committed_seq_; }
+    uint8_t get_committed_seq() const { return committed_seq_; }
+    uint8_t get_restore_count() const { return restore_count_; }
+    uint8_t get_candidate_seq() const { return candidate_seq_; }
+    const uint16_t* get_candidate_channels() const { return candidate_channels_; }
 
 private:
     TransportRcMailbox mailbox_;
@@ -319,7 +447,17 @@ private:
     bool has_channels_;
     bool has_new_frame_;
     bool was_failsafe_;
+    bool has_valid_time_;
     uint32_t last_valid_time_ms_;
     uint16_t last_channels_[CRSF_NUM_CHANNELS];
     RcAdapterStats stats_;
+
+    // RC Sequence & Restoration Candidate State
+    bool has_committed_seq_;
+    uint8_t committed_seq_;
+    uint8_t restore_count_;
+    uint8_t candidate_seq_;
+    bool has_candidate_time_;
+    uint32_t candidate_time_ms_;
+    uint16_t candidate_channels_[CRSF_NUM_CHANNELS];
 };

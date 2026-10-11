@@ -1,5 +1,9 @@
 # Dual-LRS — Open Source Bidirectional Long Range Telemetry System
 
+> **Current status:** Bench-verified development system. See
+> [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md) for the authoritative
+> current implementation, test, and flight-acceptance status.
+
 > **High-performance, bidirectional 915 MHz LoRa telemetry system for ArduPilot drones, engineered on the STM32F411 BlackPill, ESP32-WROOM-32, and Ebyte E22-900T30D (1W LoRa).**
 
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-Build%20Passing-brightgreen.svg)](https://platformio.org/)
@@ -29,33 +33,40 @@ independent modem-based protocol implementation, not a directly flashable mLRS
 build.
 
 The current verified baseline provides:
-* A bounded 64-byte modem-frame transport with CRC-16 and 50 ms TDM scheduling.
-* RC transport from the Ground unit to hardware CRSF output on the Air unit at ~20 Hz refresh rate.
-* Development-mode MAVLink fragmentation, reassembly, and basic RC coexistence.
-* Host tests and embedded build targets for the transport, RC, and TDM layers.
+* A bounded 64-byte modem-frame transport with CRC-16 and a conservative 90 ms
+  TDM schedule (`32/5/45/8` ms slots and guards).
+* Approximately 11.1 Hz fresh RF RC delivery, with local Air CRSF output paced
+  at 50 Hz using the latest accepted state.
+* RC sequence freshness filtering, failsafe output suppression, and staged
+  three-advancing-frame recovery.
+* Integrated MAVLink fragmentation/reassembly, mission upload/download,
+  parameter download, transfer-time background telemetry suppression, and
+  bounded normal-mode telemetry aggregation.
+* Host tests and embedded build targets for the transport, RC, TDM, and
+  telemetry-gating layers.
 
-Full MAVLink reliability, mission transactions, parameter transactions, and
-reconnection under packet loss remain development work; they are not claimed as
-flight-ready features.
+Mission and parameter flows have been bench verified, but production
+ACK/NACK/retry integration, packet-loss recovery, saturated-link testing,
+intentional RF cut-and-restore, and flight acceptance remain open.
 
 ---
 
 ## 2. Key Architecture & Features
 
-### A. Deterministic ~20 Hz TDM Scheduler (50.0 ms Period, RC-Fast Sweet Spot)
-* **Ground Transmit Slot (32 ms / 0.0 – 32.0 ms):** Transmits unconditional 39B packed RC control frames (`RC_CONTROL`) from the handset, with interleaved GCS uplink commands (`MAVLINK_UPLINK`) and Link Control sync frames.
-* **Turnaround Guard Gap 1 (4 ms / 32.0 – 36.0 ms):** Turnaround margin allowing receiver processing and AUX line settling before Air transmits.
-* **Air Transmit Slot (10 ms / 36.0 – 46.0 ms):** Transmits high-throughput downlink telemetry with reduced capacity due to shorter window. Payload capped at 49 bytes (`MAX_PAYLOAD_AIR_SLOT = 49`) for strict single-burst transmission ($\le 64\text{B}$ wire frame).
-* **Turnaround Guard Gap 2 (4 ms / 46.0 – 50.0 ms):** Turnaround margin and PLL synchronization window before the 50.0 ms frame wraps.
+### A. Deterministic 90 ms TDM Scheduler (approximately 11.1 Hz fresh RF cycle)
+* **Ground Transmit Slot (32 ms / 0.0 – 32.0 ms):** Transmits packed RC control frames (`RC_CONTROL`) from the handset, with bounded interleaving for GCS uplink commands and Link Control sync frames.
+* **Turnaround Guard Gap 1 (5 ms / 32.0 – 37.0 ms):** Turnaround margin allowing receiver processing and AUX line settling before Air transmits.
+* **Air Transmit Slot (45 ms / 37.0 – 82.0 ms):** Transmits downlink telemetry. Payload is capped at 49 bytes (`MAX_PAYLOAD_AIR_SLOT = 49`) for strict single-burst transmission ($\le 64\text{B}$ wire frame).
+* **Turnaround Guard Gap 2 (8 ms / 82.0 – 90.0 ms):** Turnaround margin and PLL synchronization window before the frame wraps.
 
 ```text
-                              ← 50 ms TDM Frame (20 Hz) →
-┌───────────────────────────┬─────────┬──────────────────────┬─────────┐
-│     Slot 1: Ground        │  Gap 1  │  Slot 2: Air Beacon  │  Gap 2  │
-│   RC / Commands (32 ms)   │  Guard  │   Telemetry (10 ms)  │  Guard  │
-│    RC_CONTROL, GCS Cmds   │  4 ms   │  ATTITUDE, GPS, HUD  │  4 ms   │
-└───────────────────────────┴─────────┴──────────────────────┴─────────┘
-      GROUND TRANSMITS                    AIR TRANSMITS
+                               ← 90 ms TDM Frame (≈11.1 Hz) →
+┌───────────────────────────┬─────────┬──────────────────────────────┬────────┐
+│     Slot 1: Ground        │  Gap 1  │       Slot 2: Air             │ Gap 2  │
+│   RC / Commands (32 ms)   │  Guard  │   Telemetry (45 ms)            │ Guard  │
+│    RC_CONTROL, GCS Cmds   │  5 ms   │   MAVLink downlink             │ 8 ms  │
+└───────────────────────────┴─────────┴──────────────────────────────┴────────┘
+      GROUND TRANSMITS                         AIR TRANSMITS
 ```
 
 ### B. Length-Compensated Graduated PLL Discipline
@@ -67,7 +78,7 @@ The Air unit acts as a time slave, locking its local microsecond clock to Ground
 ### C. Traffic Prioritization & Segmentation Architecture
 * **Phase 2 Single-Burst Framing:** All frames strictly bounded to $\le 64\text{ bytes}$ (13B Header + $\le 49\text{B}$ Payload + 2B CRC-16), completely eliminating modem buffer splitting.
 * **Bounded Multi-Fragment Reassembly:** Telemetry and parameter packets up to 512 bytes are segmented by `TransportFragmenter` and reassembled by `TransportReassembler` with gap detection and duplicate rejection.
-* **Integrated RC Control Pipeline:** Ingests OpenI6X/CRSF handset streams, intentionally maps handset CH6 to FC CH1, parks FC CH6 at neutral, and outputs CRSF frames to ArduPilot RC_IN on PA11 at 420,000 baud. The 50 ms TDM schedule provides ~20 Hz fresh RF RC updates; it is not a transparent channel-number bridge.
+* **Integrated RC Control Pipeline:** Ingests OpenI6X/CRSF handset streams, intentionally maps handset CH6 to FC CH1, parks FC CH6 at neutral, and outputs CRSF frames to ArduPilot RC_IN on PA11 at 420,000 baud. The 90 ms TDM schedule provides approximately 11.1 Hz fresh RF RC updates; local Air CRSF output pacing is separate and does not create fresh RF samples.
 * **Decoupled Safety Architecture:** Handset RC ingestion, RF dispatch, and failsafe watchdog remain active unconditionally, independent of MAVLink state.
 
 ---
@@ -257,24 +268,24 @@ transport serialization, CRC and bounds checks, fragmentation and reassembly,
 CRSF conversion, production RC dispatch, and the complete PlatformIO build
 matrix.
 
-The native Stage 3.2 test uses simulated radio delivery. It does not prove
-operation with real E22 AUX timing, UART queues, packet loss, or a flight
-controller. ACK/NACK generation and retry scheduling are not yet integrated
-into the production runtime. Mission upload/download, parameter read/write,
-command acknowledgement, reconnection, and saturated-link RC latency therefore
-remain unverified.
+The native Stage 3.2 tests use simulated radio delivery and are complemented by
+propellers-off Radxa/ArduPilot bench validation. Mission upload/download,
+full parameter download, RC health, and steady-state telemetry have been live
+verified. ACK/NACK generation and retry scheduling are not yet fully integrated
+into the production runtime, so packet-loss recovery, reconnection, and
+saturated-link guarantees remain unverified.
 
-Keep the default `DUAL_LRS_STAGE31_RC_ONLY=1` configuration. Do not enable
-Stage 3.2 for flight use until the reliability and physical bench gates are
-completed; perform all bench tests with propellers removed.
+Keep propellers removed for further validation. Flight acceptance still
+requires intentional RF cut-and-restore tests, FC failsafe confirmation, and
+loss/retry testing.
 
 ### RC Rate Ceiling and Optimization Target
 
-The current 50 ms TDM cycle provides one fresh Ground-to-Air RC opportunity
+The current 90 ms TDM cycle provides one fresh Ground-to-Air RC opportunity
 per cycle:
 
 ```text
-1 / 0.050 s = 20 fresh RC updates per second (RC-Fast Sweet Spot)
+1 / 0.090 s ≈ 11.1 fresh RC updates per second
 ```
 
 This is a schedule limit, not an absolute MCU or CRSF limit. The E22 UART modem
@@ -289,24 +300,23 @@ complete, the intended optimization targets are:
 
 | Operating mode | Engineering target |
 | :--- | :---: |
-| Current verified RC-priority baseline (50 ms TDM) | 20 Hz |
+| Current verified RC-priority baseline (90 ms TDM) | ≈11.1 Hz fresh RF; 50 Hz local CRSF pacing |
 | Optimized balanced RC plus telemetry mode | 15–20 Hz |
 | Future: Ultra-micro 15-byte RC frame at 50+ Hz | Under consideration |
 | 50–100 Hz CRSF streaming | Not a realistic target for this half-duplex modem architecture |
 
-The 50 ms / 20 Hz rate provides smooth manual stick control in ArduPilot while
-maintaining reserved headroom for telemetry and MAVLink commands. Further
-optimization requires empirical measurement of end-to-end latency, packet loss
-under interference, and duty-cycle headroom before TDM period reduction.
+The Air CRSF UART can be paced at 50 Hz, but that does not create new RF
+samples. Further fresh-RF optimization requires empirical measurement of
+end-to-end latency, packet loss under interference, and modem duty-cycle
+headroom before reducing the TDM period.
 failsafe behavior, and RC latency under saturated MAVLink traffic are more
 important than the nominal update frequency.
 
-At present there is no runtime Normal/RC-priority/Telemetry switch. In the
-development MAVLink build, the Ground scheduler reserves the current cycle for
-a fresh RC frame whenever one is available; it does not replace that frame
-with a queued GCS uplink. MAVLink uplink can use a Ground slot only when fresh
-handset data is unavailable. A future runtime policy must be overridden to RC
-priority whenever the FC is armed or the link is degraded.
+At present there is no runtime Normal/RC-priority/Telemetry switch. The Ground
+scheduler gives RC priority but boundedly interleaves MAVLink uplink: mission
+traffic can use approximately every second eligible Ground cycle, while normal
+GCS traffic is allowed less frequently. The FC armed/degraded-link policy still
+requires a dedicated safety review before flight use.
 
 ### Prior-Art Scheduling Context
 
@@ -349,7 +359,7 @@ Dual-LRS/
 ├── include/
 │   ├── config.h             # TDM slot timings, buffer sizing, pinout definitions
 │   ├── e22_driver.h         # Ebyte E22-900T30D UART driver header
-│   ├── tdm_engine.h         # 50 ms TDM scheduler and transport framing
+│   ├── tdm_engine.h         # 90 ms TDM scheduler and transport framing
 │   └── mavlink_handler.h    # RingBuffer, priority bypass caches, flow control
 │
 ├── src/
@@ -382,12 +392,12 @@ Dual-LRS/
 | **Frequency Range** | 850 – 930 MHz (REG2 = 0x17; exact RF frequency pending verification for the exact E22 module variant) |
 | **Transmit Power** | Module-dependent; verify the exact E22 configuration before range claims |
 | **Air Data Rate** | 62.5 kbps LoRa Modulation |
-| **TDM Frame Rate** | 20 Hz (50 ms period, RC-Fast Sweet Spot) |
+| **TDM Frame Rate** | ≈11.1 Hz (90 ms period) |
 | **Ground Slot** | 32 ms |
-| **Air Slot** | 10 ms |
-| **Guard Intervals** | Gap 1: 4 ms; Gap 2: 4 ms |
+| **Air Slot** | 45 ms |
+| **Guard Intervals** | Gap 1: 5 ms; Gap 2: 8 ms |
 | **Clock Synchronization** | Ground master / Air slave with bounded slot synchronization |
-| **MAVLink Support** | Development-mode fragmented transport; production reliability pending |
+| **MAVLink Support** | Integrated fragmentation/reassembly, mission/parameter gating, and bounded telemetry aggregation; production retry reliability pending |
 | **GCS Compatibility** | QGroundControl, Mission Planner, MAVProxy, pymavlink |
 | **Diagnostic Messages** | Automatic generation of MAVLink `RADIO_STATUS` (ID 109) |
 

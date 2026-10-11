@@ -1,5 +1,10 @@
 # Phase 1: Raw E22 Link Measurement Harness — Implementation & Source Audit Report
 
+> **Historical measurement record:** Raw modem measurements in this report are
+> retained unchanged. The current production transport uses the measured
+> single-burst boundary and the 90 ms schedule documented in
+> `docs/CURRENT_STATUS.md`.
+
 **Date:** 2026-10-01
 **Project:** Dual-LRS (Air: STM32F411 BlackPill, Ground: ESP32-WROOM-32)
 **Status:** `PHASE 1 BASELINE MEASUREMENTS COMPLETE — FORMAL SAMPLE-COUNT GATE NOT FULLY PASSED (DOCUMENTED EXCEPTION APPROVED TO PROCEED TO PHASE 2)`

@@ -1,9 +1,13 @@
 # Dual-LRS Phase 2: Transport Layer State Machines
 
 **Document Version:** 1.2.0
-**Status:** Architecture Review Package — Final Revision, No Production Transport Implemented
+**Status:** Architecture and test state machines; production framing/reassembly is integrated, while ACK/NACK retry behavior remains incomplete
 **Date:** 2026-10-01
 **Project:** Dual-LRS
+
+The state machines below document the transport architecture and tested engine
+behavior. Current firmware uses the framing/fragmentation/reassembly path, but
+production ACK/NACK generation and retry scheduling remain incomplete.
 
 ---
 
