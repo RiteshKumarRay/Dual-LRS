@@ -218,6 +218,7 @@ static const RcScanProfile SCAN_PROFILES[] = {
     {921600, SERIAL_8N1, false, false, "921k Norm (CRSF - high-speed)"},
 };
 static uint8_t currentScanIdx = 0;
+static uint8_t lastLockedScanIdx = 0;
 static bool rcHandsetLocked = false;
 static uint32_t lastScanSwitchMs = 0;
 static uint32_t lastValidCheckCount = 0;
@@ -330,35 +331,50 @@ void loop() {
         rcHandsetLocked = false;
         lastScanSwitchMs = now;
         lastValidCheckCount = rcGroundAdapter.get_total_valid_frames();
+        // Immediately return to the known-good locked profile
+        if (currentScanIdx != lastLockedScanIdx) {
+            currentScanIdx = lastLockedScanIdx;
+            Serial1.end();
+            Serial1.begin(SCAN_PROFILES[currentScanIdx].baud, SCAN_PROFILES[currentScanIdx].uart_config,
+                          PIN_GROUND_RC_RX, PIN_GROUND_RC_TX, SCAN_PROFILES[currentScanIdx].invert);
+            rcGroundAdapter.reset_protocol();
+            lastValidCheckCount = rcGroundAdapter.get_total_valid_frames();
+        }
     }
     if (!rcHandsetLocked) {
         const RcScanProfile& p = SCAN_PROFILES[currentScanIdx];
         uint32_t validNow = rcGroundAdapter.get_total_valid_frames();
         if (validNow >= 10 && (validNow - lastValidCheckCount >= 5)) {
             rcHandsetLocked = true;
+            lastLockedScanIdx = currentScanIdx;
             #if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
             Serial.printf("{\"event\":\"HANDSET_LOCKED\",\"baud\":%lu,\"invert\":%s,\"desc\":\"%s\"}\n",
                 (unsigned long)p.baud,
                 p.invert ? "true" : "false",
                 p.desc);
             #endif
-        } else if (now - lastScanSwitchMs >= 3000 && (lastByteUs == 0 || (micros() - lastByteUs > 1000000))) {
-            lastScanSwitchMs = now;
-            currentScanIdx = (currentScanIdx + 1) % (sizeof(SCAN_PROFILES) / sizeof(SCAN_PROFILES[0]));
-            Serial1.end();
-            Serial1.begin(SCAN_PROFILES[currentScanIdx].baud, SCAN_PROFILES[currentScanIdx].uart_config,
-                          PIN_GROUND_RC_RX, PIN_GROUND_RC_TX, SCAN_PROFILES[currentScanIdx].invert);
-            // Reset framing state (not stats) then capture baseline for the new profile
-            rcGroundAdapter.reset_protocol();
-            lastValidCheckCount = rcGroundAdapter.get_total_valid_frames();
-            const RcScanProfile& np = SCAN_PROFILES[currentScanIdx];
-            #if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
-            Serial.printf("{\"event\":\"SCAN_TRY\",\"idx\":%u,\"baud\":%lu,\"invert\":%s,\"desc\":\"%s\"}\n",
-                currentScanIdx,
-                (unsigned long)np.baud,
-                np.invert ? "true" : "false",
-                np.desc);
-            #endif
+        } else {
+            // Stay on the known-good profile for 6.0s before wandering.
+            // On other trial profiles, advance every 1.5s unconditionally (never wait on lastByteUs idle).
+            uint32_t profileTimeoutMs = (currentScanIdx == lastLockedScanIdx) ? 6000 : 1500;
+            if (now - lastScanSwitchMs >= profileTimeoutMs) {
+                lastScanSwitchMs = now;
+                currentScanIdx = (currentScanIdx + 1) % (sizeof(SCAN_PROFILES) / sizeof(SCAN_PROFILES[0]));
+                Serial1.end();
+                Serial1.begin(SCAN_PROFILES[currentScanIdx].baud, SCAN_PROFILES[currentScanIdx].uart_config,
+                              PIN_GROUND_RC_RX, PIN_GROUND_RC_TX, SCAN_PROFILES[currentScanIdx].invert);
+                // Reset framing state (not stats) then capture baseline for the new profile
+                rcGroundAdapter.reset_protocol();
+                lastValidCheckCount = rcGroundAdapter.get_total_valid_frames();
+                const RcScanProfile& np = SCAN_PROFILES[currentScanIdx];
+                #if defined(DUAL_LRS_STAGE31_RC_ONLY) && (DUAL_LRS_STAGE31_RC_ONLY == 1)
+                Serial.printf("{\"event\":\"SCAN_TRY\",\"idx\":%u,\"baud\":%lu,\"invert\":%s,\"desc\":\"%s\"}\n",
+                    currentScanIdx,
+                    (unsigned long)np.baud,
+                    np.invert ? "true" : "false",
+                    np.desc);
+                #endif
+            }
         }
     }
 #elif defined(DUAL_LRS_ROLE_AIR)
