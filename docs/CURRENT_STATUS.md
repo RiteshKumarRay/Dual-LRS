@@ -43,41 +43,43 @@ for the current deployed modem timing without a new measured timing review.
 
 ## MAVLink status
 
-- Mission upload and mission download were live bench verified with the
-  propellers removed.
-- Full parameter download was live bench verified.
+- Production ACK/NACK and retry state machine (`LinkTransport`) is implemented
+  and active on both Air and Ground nodes (stop-and-wait lockstep, 200 ms RTO,
+  5-retry limit, duplicate re-ACK without duplicate application delivery).
+- Clean transfer acceptance passed: 10 consecutive mission upload and download
+  cycles verified with 100% bit-exact waypoint coordinate integrity.
+- Full parameter table download verified: 1003 active parameters retrieved with
+  targeted hole recovery over the RF link (5.1–7.8 params/sec).
 - Background telemetry is suppressed while mission or parameter transfers are
   active; mission/parameter protocol messages remain prioritized.
-- Normal-mode telemetry aggregation is implemented, but only complete MAVLink
-  frames that fit together within the 49-byte transport payload can be
-  combined. Large common messages such as `ATTITUDE`, `VFR_HUD`, GPS and
-  position messages often still require separate transport opportunities.
-- The Air slot still sends at most one RF transport frame per TDM cycle.
-- Current production transfers remain best-effort at the transport layer;
-  production ACK/NACK generation and retry-manager integration are not yet a
-  complete loss-recovery guarantee.
+- Ground scheduler interleave guarantees RC control priority while allocating
+  slots to MAVLink transactions (1:2 during active mission/ACK, 1:4 normal).
+  Ground falls back to transmitting live RC rather than an empty beacon if no
+  MAVLink packet is ready.
+- Saturated traffic stress test passed with zero RC failsafes, zero MCU reboots,
+  and zero `BAD_DATA` frames.
 
 ## Host and build verification
 
-The current worker changes have passed:
+All 7 host test suites pass cleanly (**54 / 54 tests passing, 100% SUCCESS**):
 
-- RC adapter suite: 7 tests.
+- C++ Transport protocol suite: 5 tests.
 - Transport engine suite: 10 tests.
+- Production TDM scheduler suite: 7 tests.
 - Production RC dispatch suite: 5 tests.
+- Controlled RC adapter suite: 7 tests.
 - Production MAVLink transport suite: 5 tests.
-- MAVLink telemetry gating and aggregation suite.
-- `git diff --check`.
+- Phase 3 Reliable LinkTransport suite: 15 tests.
+- Master test runner: `bash tools/run_all_host_tests.sh`.
 - PlatformIO targets: `dual_lrs_air`, `dual_lrs_ground`, and
   `dual_lrs_ground_esp32`.
 
 ## Remaining acceptance gates
 
-- Intentional RF cut-and-restore with props removed, including FC-recognized
-  failsafe action and recovery.
-- Repeated mission and parameter runs under clean and impaired RF conditions.
-- Production ACK/NACK/retry integration and packet-loss recovery.
-- Queue/backpressure behavior under saturated MAVLink traffic.
-- Flight-controller-specific failsafe parameter confirmation.
+- Powered-node RF loss (RF shielding/attenuation while both MCUs stay powered).
+- Impaired-RF mission/parameter transfer recovery on live link.
+- Armed failsafe action / throttle-cut validation with propellers removed.
+- Final flight-readiness review and sign-off.
 - No flight authorization has been granted by this document.
 
 ## Documentation policy
