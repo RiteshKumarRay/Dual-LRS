@@ -33,8 +33,8 @@ test_wps = [
     (int(19.0775 * 1e7), int(72.8780 * 1e7), 25.0),  # WP3
 ]
 
-for cycle in range(1, 4):
-    print(f"\n>>> CYCLE {cycle}/3 <<<")
+for cycle in range(1, 11):
+    print(f"\n>>> CYCLE {cycle}/10 <<<")
 
     # 1. Clear existing mission
     print("  [1/3] Clearing mission...")

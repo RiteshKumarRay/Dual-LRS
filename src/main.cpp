@@ -511,44 +511,47 @@ void loop() {
                 // frame must not be displaced by a queued GCS packet.
                 bool send_rc = has_rc;
 #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
-                bool has_uplink_mavlink = linkTransport.has_outgoing_frame() || telemHandler.hasOutboundData();
+                // Pull next packet into linkTransport if idle
+                if (!linkTransport.is_tx_active() && !linkTransport.has_pending_ack_nack() && telemHandler.hasOutboundData()) {
+                    size_t pkt_len = telemHandler.getOutboundPacket(groundTxMsgBuf, sizeof(groundTxMsgBuf));
+                    if (pkt_len > 0) {
+                        linkTransport.start_transfer(TransportChannel::MAVLINK_UPLINK, groundTxMsgBuf, (uint16_t)pkt_len, true);
+                    }
+                }
+
+                bool mavlink_ready = linkTransport.has_outgoing_frame();
                 static uint8_t slotsSinceRc = 0;
                 // Priority interleaving: When RC and GCS uplink are both active:
                 // During active mission transfer or pending ACK, boost GCS uplink to 1 slot every 2 cycles (slotsSinceRc >= 1)
                 // so waypoint handshakes and ACKs execute 2x faster (180ms round-trip) without starving RC.
                 // In normal telemetry mode, allow 1 GCS slot every 4 cycles (slotsSinceRc >= 3) to minimize RC jitter.
                 uint8_t maxRcSlots = (telemHandler.isMissionActive() || linkTransport.has_pending_ack_nack()) ? 1 : 3;
-                if (has_rc && has_uplink_mavlink && slotsSinceRc >= maxRcSlots) {
+                if (has_rc && mavlink_ready && slotsSinceRc >= maxRcSlots) {
                     send_rc = false;
                     slotsSinceRc = 0;
                 } else if (has_rc) {
                     send_rc = true;
                     slotsSinceRc++;
+                } else {
+                    send_rc = false;
                 }
-                if (!send_rc && has_uplink_mavlink) {
-                    if (!linkTransport.is_tx_active() && !linkTransport.has_pending_ack_nack()) {
-                        size_t pkt_len = telemHandler.getOutboundPacket(groundTxMsgBuf, sizeof(groundTxMsgBuf));
-                        if (pkt_len > 0) {
-                            linkTransport.start_transfer(TransportChannel::MAVLINK_UPLINK, groundTxMsgBuf, (uint16_t)pkt_len, true);
-                        }
-                    }
-                    if (linkTransport.has_outgoing_frame()) {
-                        uint8_t frame_buf[TRANSPORT_MAX_FRAME_SIZE];
-                        size_t frame_len = linkTransport.get_next_tx_frame(frame_buf, tdm.getNextSequence(), now);
-                        if (frame_len > 0) {
-                            ok = tdm.sendRawTransportFrame(frame_buf, frame_len);
-                            if (ok) gcsMavlinkRfSent++;
-                        }
+
+                if (!send_rc && mavlink_ready) {
+                    uint8_t frame_buf[TRANSPORT_MAX_FRAME_SIZE];
+                    size_t frame_len = linkTransport.get_next_tx_frame(frame_buf, tdm.getNextSequence(), now);
+                    if (frame_len > 0) {
+                        ok = tdm.sendRawTransportFrame(frame_buf, frame_len);
+                        if (ok) gcsMavlinkRfSent++;
                     }
                 }
 #endif
-                // RC transmission remains enabled in every production mode.
-                if (send_rc) {
+                // RC transmission: If send_rc is true, or if MAVLink did not send anything and RC is present, send RC!
+                if (send_rc || (!ok && has_rc)) {
                     ok = tdm.sendTransportFrame(TransportChannel::RC_CONTROL,
                                                 TRANSPORT_FLAG_FIRST_FRAG | TRANSPORT_FLAG_LAST_FRAG,
                                                 0, 0, (const uint8_t*)&packed_rc, sizeof(TransportPackedRc));
                 } else if (!ok) {
-                    // Fallback beacon if no RC and no MAVLink sent
+                    // Fallback beacon only when no RC handset and no MAVLink sent
                     ok = tdm.sendTransportFrame(TransportChannel::LINK_CONTROL,
                                                 TRANSPORT_FLAG_FIRST_FRAG | TRANSPORT_FLAG_LAST_FRAG,
                                                 0, 0, nullptr, 0);
@@ -562,7 +565,7 @@ void loop() {
                 if (!linkTransport.is_tx_active() && !linkTransport.has_pending_ack_nack()) {
                     size_t pkt_len = telemHandler.getNormalTelemetryPayload(airTxMsgBuf, sizeof(airTxMsgBuf));
                     if (pkt_len > 0) {
-                        bool reliable = (pkt_len > 49) || telemHandler.isMissionActive() || telemHandler.isParamDownloadActive();
+                        bool reliable = (pkt_len > 49) || telemHandler.isMissionActive();
                         linkTransport.start_transfer(TransportChannel::MAVLINK_DOWNLINK, airTxMsgBuf, (uint16_t)pkt_len, reliable);
                     }
                 }
