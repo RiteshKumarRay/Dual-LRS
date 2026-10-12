@@ -1,9 +1,5 @@
 # Dual-LRS — Open Source Bidirectional Long Range Telemetry System
 
-> **Current status:** Bench-verified development system. See
-> [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md) for the authoritative
-> current implementation, test, and flight-acceptance status.
-
 > **High-performance, bidirectional 915 MHz LoRa telemetry system for ArduPilot drones, engineered on the STM32F411 BlackPill, ESP32-WROOM-32, and Ebyte E22-900T30D (1W LoRa).**
 
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-Build%20Passing-brightgreen.svg)](https://platformio.org/)
