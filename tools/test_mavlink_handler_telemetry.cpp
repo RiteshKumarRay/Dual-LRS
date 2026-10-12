@@ -73,8 +73,49 @@ static std::vector<uint8_t> mavlink_v1(uint8_t msgid, uint8_t payload_len) {
     return mavlink_v1_valid(msgid, payload_len);
 }
 
-static uint8_t message_id(const std::vector<uint8_t>& frame) {
-    return frame[0] == 0xFE ? frame[5] : frame[7];
+static void update_crc(std::vector<uint8_t>& frame) {
+    const size_t header = frame[0] == 0xFE ? 6 : 10;
+    const uint8_t msgid = frame[0] == 0xFE ? frame[5] : frame[7];
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 1; i < header + frame[1]; ++i) mavlink_crc_accum(frame[i], &crc);
+    mavlink_crc_accum(TEST_MAVLINK_CRCS[msgid], &crc);
+    frame[header + frame[1]] = (uint8_t)crc;
+    frame[header + frame[1] + 1] = (uint8_t)(crc >> 8);
+}
+
+static std::vector<uint8_t> param_value(uint16_t count, uint16_t index, bool v2 = false) {
+    std::vector<uint8_t> frame = mavlink_v1(22, 25);
+    if (v2) {
+        frame.assign(37, 0);
+        frame[0] = 0xFD;
+        frame[1] = 25;
+        frame[5] = frame[6] = 1;
+        frame[7] = 22;
+    }
+    const size_t offset = v2 ? 10 : 6;
+    frame[offset + 4] = (uint8_t)count;
+    frame[offset + 5] = (uint8_t)(count >> 8);
+    frame[offset + 6] = (uint8_t)index;
+    frame[offset + 7] = (uint8_t)(index >> 8);
+    update_crc(frame);
+    return frame;
+}
+
+static std::vector<uint8_t> mavlink_v2(uint8_t msgid, uint8_t payload_len, bool signedFrame = false) {
+    std::vector<uint8_t> frame((size_t)payload_len + 12 + (signedFrame ? 13 : 0), 0);
+    frame[0] = 0xFD;
+    frame[1] = payload_len;
+    frame[2] = signedFrame ? 1 : 0;
+    frame[5] = frame[6] = 1;
+    frame[7] = msgid;
+    update_crc(frame);
+    return frame;
+}
+
+static void set_param_value_marker(std::vector<uint8_t>& frame, uint8_t marker) {
+    const size_t offset = frame[0] == 0xFD ? 10 : 6;
+    frame[offset] = marker;
+    update_crc(frame);
 }
 
 static bool drain_packet(MavlinkHandler& handler, uint8_t expected_msgid) {
@@ -144,12 +185,171 @@ bool test_remote_mission_completion_and_queued_telemetry_drop() {
     return true;
 }
 
+bool test_mission_queue_does_not_overwrite_pending_handshake() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+
+    std::vector<uint8_t> mission_count = mavlink_v1(44, 4);
+    std::vector<uint8_t> mission_ack = mavlink_v1(47, 3);
+
+    // A second mission packet can arrive before the first gets a Ground slot.
+    // Both packets must survive the cache handoff in arrival order.
+    handler.ingestBytes(mission_count.data(), mission_count.size());
+    handler.ingestBytes(mission_ack.data(), mission_ack.size());
+
+    uint8_t packet[296] = {};
+    size_t len = handler.getOutboundPacket(packet, sizeof(packet));
+    TEST_ASSERT(len == mission_count.size() && packet[5] == 44,
+                "pending MISSION_COUNT must not be replaced by a later MISSION_ACK");
+    len = handler.getOutboundPacket(packet, sizeof(packet));
+    TEST_ASSERT(len == mission_ack.size() && packet[5] == 47,
+                "queued MISSION_ACK must be delivered after the earlier mission packet");
+    return true;
+}
+
+bool test_new_mission_session_discards_abandoned_packets() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+    auto abandoned = mavlink_v1(44, 4);
+    auto request_list = mavlink_v1(43, 2);
+    handler.ingestBytes(abandoned.data(), abandoned.size());
+    g_mock_millis += 2501;
+    handler.readFromLocal();
+    TEST_ASSERT(!handler.isMissionActive(), "stalled mission exchange must expire");
+    TEST_ASSERT(!handler.hasOutboundData(), "stalled mission exchange must discard its abandoned packet");
+
+    handler.ingestBytes(request_list.data(), request_list.size());
+    uint8_t packet[296] = {};
+    size_t len = handler.getOutboundPacket(packet, sizeof(packet));
+    TEST_ASSERT(len == request_list.size() && packet[5] == 43,
+                "new mission session must not transmit an abandoned packet first");
+    return true;
+}
+
+bool test_new_parameter_request_discards_stale_queued_values() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+
+    std::vector<uint8_t> request = mavlink_v1(21, 2);
+    std::vector<uint8_t> stale = param_value(1, 0);
+    std::vector<uint8_t> fresh = param_value(1, 0);
+    set_param_value_marker(stale, 0x11);
+    set_param_value_marker(fresh, 0xA5);
+
+    handler.writeToLocal(request.data(), request.size());
+    handler.ingestBytes(stale.data(), stale.size());
+    TEST_ASSERT(handler.isParamDownloadActive(), "initial parameter request must activate the gate");
+
+    // Reconnect/request-list starts a new session while the old value is still
+    // queued. The stale value must not complete or precede the new response.
+    handler.writeToLocal(request.data(), request.size());
+    handler.ingestBytes(fresh.data(), fresh.size());
+
+    uint8_t packet[296] = {};
+    TEST_ASSERT(handler.isParamDownloadActive(), "new parameter session must remain active until delivery");
+    size_t len = handler.getOutboundPacket(packet, sizeof(packet));
+    TEST_ASSERT(len == fresh.size() && packet[5] == 22 && packet[6] == 0xA5,
+                "new request must deliver the fresh PARAM_VALUE, not stale queued data");
+    TEST_ASSERT(!handler.isParamDownloadActive(), "fresh single-value parameter session must complete on delivery");
+    return true;
+}
+
+bool test_begin_resets_incomplete_parsers_and_transfer_state() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+    auto request = mavlink_v1(21, 2);
+    auto mission = mavlink_v1(44, 4);
+    auto heartbeat = mavlink_v1(0, 9);
+    handler.writeToLocalAir(request.data(), request.size());
+    handler.ingestBytes(mission.data(), mission.size());
+    handler.ingestBytes(heartbeat.data(), 5);
+    handler.writeToLocalGround(heartbeat.data(), 5);
+    handler.begin();
+    TEST_ASSERT(!handler.isTelemetrySuppressed(), "begin must clear abandoned mission/parameter gates");
+    TEST_ASSERT(!handler.hasOutboundData(), "begin must clear abandoned queued packets");
+    handler.ingestBytes(heartbeat.data(), heartbeat.size());
+    TEST_ASSERT(drain_packet(handler, 0), "first local packet after begin must parse immediately");
+    local.bytes.clear();
+    handler.writeToLocalGround(heartbeat.data(), heartbeat.size());
+    TEST_ASSERT(local.bytes == heartbeat, "first RF packet after begin must parse immediately");
+    return true;
+}
+
+bool test_split_and_concatenated_uplink_session_observation() {
+    for (bool v2 : {false, true}) {
+        CaptureStream local;
+        MavlinkHandler handler(local);
+        handler.begin();
+        auto request = v2 ? mavlink_v2(21, 2, true) : mavlink_v1(21, 2);
+        auto mission = v2 ? mavlink_v2(44, 4) : mavlink_v1(44, 4);
+        // An odd v1 sequence byte must not be interpreted as v2 signing flags.
+        mission[2] = v2 ? 0 : 1;
+        update_crc(mission);
+        handler.writeToLocalAir(request.data(), 5);
+        TEST_ASSERT(!handler.isParamDownloadActive(), "partial uplink must not start a session");
+        std::vector<uint8_t> rest(request.begin() + 5, request.end());
+        rest.insert(rest.end(), mission.begin(), mission.end());
+        handler.writeToLocalAir(rest.data(), rest.size());
+        TEST_ASSERT(handler.isParamDownloadActive(), "split valid PARAM_REQUEST_LIST must activate its session");
+        TEST_ASSERT(handler.isMissionActive(), "second frame in one uplink buffer must activate its session");
+        auto ack = v2 ? mavlink_v2(47, 3) : mavlink_v1(47, 3);
+        handler.writeToLocalAir(ack.data(), ack.size());
+        TEST_ASSERT(!handler.isMissionActive(), "ACK following v1 odd sequence must be observed");
+        std::vector<uint8_t> expected = request;
+        expected.insert(expected.end(), mission.begin(), mission.end());
+        expected.insert(expected.end(), ack.begin(), ack.end());
+        TEST_ASSERT(local.bytes == expected, "uplink observation must preserve every FC byte");
+    }
+    return true;
+}
+
+bool test_mission_fragments_survive_new_packet_ingress() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+    auto item = mavlink_v2(73, 38, true);
+    auto request = mavlink_v2(51, 5);
+    handler.ingestBytes(item.data(), item.size());
+    uint8_t bytes[296] = {};
+    size_t len = handler.getOutboundPayload(bytes, 9);
+    std::vector<uint8_t> received(bytes, bytes + len);
+    handler.ingestBytes(request.data(), request.size());
+    while (received.size() < item.size()) {
+        len = handler.getOutboundPayload(bytes, 9);
+        TEST_ASSERT(len > 0, "fragmented mission item must keep progressing");
+        received.insert(received.end(), bytes, bytes + len);
+    }
+    TEST_ASSERT(received == item, "later mission ingress must not replace an in-progress mission tail");
+    len = handler.getOutboundPacket(bytes, sizeof(bytes));
+    TEST_ASSERT(len == request.size() && memcmp(bytes, request.data(), len) == 0,
+                "next mission request must stay queued intact");
+    return true;
+}
+
+bool test_wifi_ingress_recovers_after_partial_packet_timeout() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+    auto request = mavlink_v1(21, 2);
+    handler.ingestBytes(request.data(), 5);
+    g_mock_millis += 51;
+    handler.ingestBytes(request.data(), request.size());
+    TEST_ASSERT(handler.isParamDownloadActive(), "new Wi-Fi packet after a gap must not join a stale partial frame");
+    TEST_ASSERT(drain_packet(handler, 21), "request after timeout must remain intact");
+    return true;
+}
+
 bool test_parameter_suppression_and_completion() {
     CaptureStream local;
     MavlinkHandler handler(local);
     handler.begin();
 
     std::vector<uint8_t> param_request = mavlink_v1(21, 2);
+    update_crc(param_request);
     std::vector<uint8_t> param_value_0 = mavlink_v1(22, 25);
     std::vector<uint8_t> param_value_1 = mavlink_v1(22, 25);
     std::vector<uint8_t> vfr_hud = mavlink_v1(74, 20);
@@ -161,6 +361,7 @@ bool test_parameter_suppression_and_completion() {
     // PARAM_VALUE payload: param_count at offset 4, param_index at offset 6.
     param_value_0[10] = 2;
     param_value_0[12] = 0;
+    update_crc(param_value_0);
     handler.ingestBytes(param_value_0.data(), param_value_0.size());
     handler.ingestBytes(vfr_hud.data(), vfr_hud.size());
     TEST_ASSERT(handler.isTelemetrySuppressed(), "Parameter gate must remain active before final value");
@@ -173,10 +374,13 @@ bool test_parameter_suppression_and_completion() {
 
     param_value_1[10] = 2;
     param_value_1[12] = 1;
+    update_crc(param_value_1);
     handler.ingestBytes(param_value_1.data(), param_value_1.size());
-    TEST_ASSERT(!handler.isParamDownloadActive(), "Final PARAM_VALUE must end list gate");
-    TEST_ASSERT(!handler.isTelemetrySuppressed(), "Telemetry gate must clear after final PARAM_VALUE");
+    TEST_ASSERT(handler.isParamDownloadActive(),
+                "Parameter gate must stay active until the final PARAM_VALUE leaves the queue");
     TEST_ASSERT(drain_packet(handler, 22), "Final PARAM_VALUE must be delivered");
+    TEST_ASSERT(!handler.isParamDownloadActive(), "Final PARAM_VALUE transmission must end list gate");
+    TEST_ASSERT(!handler.isTelemetrySuppressed(), "Telemetry gate must clear after final PARAM_VALUE transmission");
 
     handler.ingestBytes(vfr_hud.data(), vfr_hud.size());
     TEST_ASSERT(drain_packet(handler, 74), "Telemetry must resume after parameter completion");
@@ -353,12 +557,15 @@ bool test_parameter_priority_and_suppression_with_aggregation() {
     handler.begin();
 
     std::vector<uint8_t> param_request = mavlink_v1(21, 2);
+    update_crc(param_request);
     std::vector<uint8_t> param_val0 = mavlink_v1(22, 25);
     param_val0[10] = 2; // param_count = 2
     param_val0[12] = 0; // param_index = 0
     std::vector<uint8_t> param_val1 = mavlink_v1(22, 25);
     param_val1[10] = 2; // param_count = 2
     param_val1[12] = 1; // param_index = 1
+    update_crc(param_val0);
+    update_crc(param_val1);
     std::vector<uint8_t> vfr_hud = mavlink_v1(74, 16);
 
     // GCS requests parameter list
@@ -381,11 +588,12 @@ bool test_parameter_priority_and_suppression_with_aggregation() {
 
     // Deliver final parameter
     handler.ingestBytes(param_val1.data(), param_val1.size());
-    TEST_ASSERT(!handler.isParamDownloadActive(), "Param download completed");
-    TEST_ASSERT(!handler.isTelemetrySuppressed(), "Suppression cleared");
+    TEST_ASSERT(handler.isParamDownloadActive(), "Param gate remains active while final value is queued");
 
     len = handler.getNormalTelemetryPayload(payload, sizeof(payload));
     TEST_ASSERT(len == param_val1.size() && payload[5] == 22, "Final PARAM_VALUE delivered");
+    TEST_ASSERT(!handler.isParamDownloadActive(), "Param download completed after final value transmission");
+    TEST_ASSERT(!handler.isTelemetrySuppressed(), "Suppression cleared after final value transmission");
 
     // Telemetry resumes
     g_mock_millis += 1000;
@@ -396,16 +604,85 @@ bool test_parameter_priority_and_suppression_with_aggregation() {
     return true;
 }
 
+bool test_parameter_completion_requires_distinct_indices() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+
+    std::vector<uint8_t> request = mavlink_v1(21, 2);
+    std::vector<uint8_t> first = param_value(3, 0);
+    std::vector<uint8_t> duplicate = param_value(3, 2);
+    std::vector<uint8_t> last = param_value(3, 2);
+    std::vector<uint8_t> vfr_hud = mavlink_v1(74, 16);
+
+    handler.writeToLocal(request.data(), request.size());
+    handler.ingestBytes(first.data(), first.size());
+    handler.ingestBytes(duplicate.data(), duplicate.size());
+    handler.ingestBytes(last.data(), last.size());
+    handler.ingestBytes(vfr_hud.data(), vfr_hud.size());
+    TEST_ASSERT(handler.isParamDownloadActive(),
+                "Out-of-order values must not complete a list with a missing index");
+
+    uint8_t packet[296] = {};
+    while (handler.getOutboundPacket(packet, sizeof(packet)) != 0) {
+        // Drain the values already received; telemetry must remain gated.
+    }
+    TEST_ASSERT(handler.isParamDownloadActive(), "Missing parameter must keep telemetry gated");
+    TEST_ASSERT(handler.getOutboundPacket(packet, sizeof(packet)) == 0,
+                "Routine telemetry must stay suppressed while a parameter index is missing");
+
+    std::vector<uint8_t> missing = param_value(3, 1);
+    handler.ingestBytes(missing.data(), missing.size());
+    TEST_ASSERT(handler.isParamDownloadActive(), "Final received value remains queued until transmitted");
+    TEST_ASSERT(drain_packet(handler, 22), "Missing parameter must remain deliverable");
+    TEST_ASSERT(!handler.isParamDownloadActive(), "Distinct complete parameter set must release gate");
+
+    handler.ingestBytes(vfr_hud.data(), vfr_hud.size());
+    TEST_ASSERT(drain_packet(handler, 74), "Routine telemetry must resume after all parameters transmit");
+    return true;
+}
+
+bool test_stalled_parameter_list_releases_gate_after_timeout() {
+    CaptureStream local;
+    MavlinkHandler handler(local);
+    handler.begin();
+
+    std::vector<uint8_t> request = mavlink_v1(21, 2);
+    update_crc(request);
+    handler.writeToLocal(request.data(), request.size());
+    TEST_ASSERT(handler.isParamDownloadActive(), "parameter list must activate gate");
+
+    // A stalled FC must not leave routine telemetry disabled forever. The
+    // timeout is intentionally much longer than the normal reliable retry
+    // window and only applies after the parameter queue has drained.
+    g_mock_millis += 10001;
+    handler.readFromLocal();
+    TEST_ASSERT(!handler.isParamDownloadActive(),
+                "stalled parameter list must release suppression after timeout");
+    TEST_ASSERT(!handler.isTelemetrySuppressed(),
+                "routine telemetry must be able to recover after an aborted list");
+    return true;
+}
+
 int main() {
     std::cout << "=== Running MAVLink telemetry gating tests ===\n";
     if (!test_mission_suppression_and_ack_resume() ||
         !test_remote_mission_completion_and_queued_telemetry_drop() ||
+        !test_mission_queue_does_not_overwrite_pending_handshake() ||
+        !test_new_mission_session_discards_abandoned_packets() ||
+        !test_new_parameter_request_discards_stale_queued_values() ||
+        !test_begin_resets_incomplete_parsers_and_transfer_state() ||
+        !test_split_and_concatenated_uplink_session_observation() ||
+        !test_mission_fragments_survive_new_packet_ingress() ||
+        !test_wifi_ingress_recovers_after_partial_packet_timeout() ||
         !test_parameter_suppression_and_completion() ||
         !test_normal_telemetry_aggregation_two_frames() ||
         !test_aggregation_never_exceeds_49_bytes() ||
         !test_ground_output_parser_concatenated_frames() ||
         !test_mission_priority_and_telemetry_suppression_with_aggregation() ||
-        !test_parameter_priority_and_suppression_with_aggregation()) {
+        !test_parameter_priority_and_suppression_with_aggregation() ||
+        !test_parameter_completion_requires_distinct_indices() ||
+        !test_stalled_parameter_list_releases_gate_after_timeout()) {
         return 1;
     }
     std::cout << "=== ALL MAVLink telemetry gating and aggregation tests passed ===\n";

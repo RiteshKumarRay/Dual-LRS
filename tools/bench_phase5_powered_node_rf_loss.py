@@ -83,6 +83,14 @@ class FCTruthAuditor:
     def stop(self):
         self.running = False
 
+    def failsafe_observed_since(self, timestamp):
+        """Only count a failsafe event after the current loss marker."""
+        return any(event_time >= timestamp for event_time, _ in self.failsafe_events)
+
+    def recovery_observed_since(self, timestamp):
+        """Only count a healthy/clear event after the current restore marker."""
+        return any(event_time >= timestamp for event_time, _ in self.failsafe_cleared_events)
+
 
 def execute_mission_cycle(gnd, sysid, compid, cycle_label):
     WP_COUNT = 4
@@ -229,7 +237,8 @@ def main():
     print(BOLD + "="*78 + RESET)
     print(YELLOW + "INSTRUCTIONS FOR BENCH TESTER:" + RESET)
     print("1. Ground ESP32 and Air BlackPill MUST REMAIN POWERED.")
-    print("2. Interrupt ONLY the RF path now (e.g. place metal shield over antennas, or disconnect antenna).")
+    print("2. Interrupt ONLY the RF path using approved shielding or a rated attenuator.")
+    print("   NEVER disconnect an antenna or leave a powered RF output unterminated.")
     print("3. Maintain RF loss for 5 to 10 seconds.")
     print("4. Press ENTER when RF path has been interrupted...")
     input(">>> Press ENTER once RF loss is applied: ")
@@ -241,7 +250,7 @@ def main():
     failsafe_detected = False
     for _ in range(50): # up to 5 seconds
         time.sleep(0.1)
-        if len(auditor.failsafe_events) > 0 or auditor.last_healthy_state is False:
+        if auditor.failsafe_observed_since(t_loss_start):
             failsafe_detected = True
             t_fs = time.time()
             elapsed_fs = (t_fs - t_loss_start) * 1000.0
@@ -263,7 +272,7 @@ def main():
     print(BOLD + "[Phase 5C] RESTORE RF PATH" + RESET)
     print(BOLD + "="*78 + RESET)
     print(YELLOW + "INSTRUCTIONS FOR BENCH TESTER:" + RESET)
-    print("1. Remove the shield / restore the antenna / restore the RF path now.")
+    print("1. Remove the shield or restore the approved attenuator setting.")
     print("2. Both MCUs should still be powered.")
     print("3. Press ENTER when RF path is restored...")
     input(">>> Press ENTER once RF path is restored: ")
@@ -275,7 +284,7 @@ def main():
     cleared = False
     for _ in range(80): # up to 8 seconds
         time.sleep(0.1)
-        if len(auditor.failsafe_cleared_events) > 0 or auditor.last_healthy_state is True:
+        if auditor.recovery_observed_since(t_restore):
             cleared = True
             t_clr = time.time()
             elapsed_clr = (t_clr - t_restore) * 1000.0

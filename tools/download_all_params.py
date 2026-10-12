@@ -5,7 +5,7 @@ from pymavlink import mavutil
 sys.stdout.reconfigure(line_buffering=True)
 
 print("===============================================================")
-print("DUAL-LRS: FULL 0-1037 PARAMETER DOWNLOAD HARDWARE VERIFICATION")
+print("DUAL-LRS: FULL PARAMETER DOWNLOAD HARDWARE VERIFICATION")
 print("===============================================================")
 
 print("Connecting to Ground Station on /dev/ttyUSB0 (115200 baud)...")
@@ -42,13 +42,15 @@ print("\n[UPLINK] Requesting full parameter table (PARAM_REQUEST_LIST)...")
 m.mav.param_request_list_send(sysid, compid)
 
 params = {}
-total_params = 1037
+total_params = None
 t_start = time.time()
 last_rx_time = t_start
 first_rx_time = None
 
 print("[DOWNLINK] Streaming parameters over Dual-LRS LoRa link...")
-# Stream download loop: keep reading as long as parameters arrive (3.5s inactivity timeout)
+# Stream download loop: keep reading as long as parameters arrive. The timeout
+# is deliberately longer than the reliable RF retry window so a temporary RF
+# pause does not look like a completed table.
 while True:
     msg = m.recv_match(type='PARAM_VALUE', blocking=True, timeout=0.2)
     if msg:
@@ -72,9 +74,10 @@ while True:
         if total_params and len(params) >= total_params:
             break
     else:
-        # Inactivity check: if we've received at least 1 param, wait up to 4.5s for more
+        # Inactivity check: if we've received at least 1 param, wait for a
+        # bounded pause before starting targeted hole recovery.
         if first_rx_time is not None:
-            if time.time() - last_rx_time > 4.5:
+            if time.time() - last_rx_time > 10.0:
                 break
         else:
             # If no param received yet, wait up to 5s after request
@@ -84,6 +87,9 @@ while True:
                 t_start = time.time()
 
 initial_elapsed = time.time() - t_start
+if total_params is None:
+    print("\n[STREAM FAILED] No PARAM_VALUE response was received.")
+    sys.exit(1)
 print(f"\n[STREAM COMPLETED] Initial stream downlinked {len(params)}/{total_params} parameters in {initial_elapsed:.1f}s ({len(params)/initial_elapsed:.1f} params/sec)")
 
 # Step 2: Fill any missing indices with targeted individual requests
@@ -97,7 +103,7 @@ if missing:
             m.mav.param_request_read_send(sysid, compid, b'', m_idx)
             t_req = time.time()
             found = False
-            while time.time() - t_req < 1.2:
+            while time.time() - t_req < 3.0:
                 msg = m.recv_match(type='PARAM_VALUE', blocking=True, timeout=0.1)
                 if msg:
                     idx = msg.param_index

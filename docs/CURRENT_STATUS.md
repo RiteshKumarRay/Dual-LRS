@@ -45,13 +45,18 @@ for the current deployed modem timing without a new measured timing review.
 
 - Production ACK/NACK and retry state machine (`LinkTransport`) is implemented
   and active on both Air and Ground nodes (stop-and-wait lockstep, 200 ms RTO,
-  5-retry limit, duplicate re-ACK without duplicate application delivery).
+  5-retry limit, strict ACK/NACK identity matching, and duplicate re-ACK
+  without duplicate application delivery, including after a consumed message
+  loses its final ACK).
 - Clean transfer acceptance passed: 10 consecutive mission upload and download
   cycles verified with 100% bit-exact waypoint coordinate integrity.
-- Full parameter table download verified: 1003 active parameters retrieved with
-  targeted hole recovery over the RF link (5.1–7.8 params/sec).
+- Full parameter table download verified: 1004/1004 parameters retrieved with
+  100% first-pass completeness over the RF link (9.8 params/sec, 102.1s elapsed,
+  zero dropped parameters, zero hole recovery required).
 - Background telemetry is suppressed while mission or parameter transfers are
-  active; mission/parameter protocol messages remain prioritized.
+  active; mission/parameter protocol messages remain prioritized. Parameter
+  downlink fragments use reliable stop-and-wait delivery and routine telemetry
+  resumes only after every distinct parameter index has been delivered.
 - Ground scheduler interleave guarantees RC control priority while allocating
   slots to MAVLink transactions (1:2 during active mission/ACK, 1:4 normal).
   Ground falls back to transmitting live RC rather than an empty beacon if no
@@ -61,7 +66,7 @@ for the current deployed modem timing without a new measured timing review.
 
 ## Host and build verification
 
-All 7 host test suites pass cleanly (**54 / 54 tests passing, 100% SUCCESS**):
+All 8 host test suites pass cleanly (**69 / 69 tests passing, 100% SUCCESS**):
 
 - C++ Transport protocol suite: 5 tests.
 - Transport engine suite: 10 tests.
@@ -69,7 +74,8 @@ All 7 host test suites pass cleanly (**54 / 54 tests passing, 100% SUCCESS**):
 - Production RC dispatch suite: 5 tests.
 - Controlled RC adapter suite: 7 tests.
 - Production MAVLink transport suite: 5 tests.
-- Phase 3 Reliable LinkTransport suite: 15 tests.
+- MAVLink telemetry gating suite: 10 tests.
+- Phase 3 Reliable LinkTransport suite: 20 tests.
 - Master test runner: `bash tools/run_all_host_tests.sh`.
 - PlatformIO targets: `dual_lrs_air`, `dual_lrs_ground`, and
   `dual_lrs_ground_esp32`.

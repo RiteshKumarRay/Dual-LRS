@@ -85,10 +85,7 @@ public:
     uint32_t validParamValues() const { return _validParamValues; }
     uint32_t lastParamRxMs() const { return _lastParamRxMs; }
     bool isParamDownloadActive() const { return _paramDownloadActive; }
-    void notifyParamRequest() {
-        _paramDownloadActive = true;
-        _lastParamRxMs = millis();
-    }
+    void notifyParamRequest();
     bool isMissionActive() const { return _missionTransferActive; }
     bool isTelemetrySuppressed() const {
         return _missionTransferActive || _paramDownloadActive;
@@ -105,6 +102,12 @@ private:
     uint32_t _lastParamRxMs = 0;
     bool     _paramDownloadActive = false;
     bool     _paramListActive = false;
+    uint16_t _paramExpectedCount = 0;
+    uint16_t _paramReceivedCount = 0;
+    // Cover the entire MAVLink uint16 index space. A bitmap prevents duplicate
+    // or out-of-order values from falsely completing a full-list download.
+    static constexpr size_t PARAM_TRACKING_MAX = 65536;
+    uint8_t  _paramReceivedBitmap[PARAM_TRACKING_MAX / 8] = {};
     bool     _missionTransferActive = false;
     uint32_t _lastLocalByteMs = 0;
     uint32_t _lastSysStatusMs = 0;   // SYS_STATUS  (msgid 1)   — battery
@@ -150,7 +153,14 @@ private:
     void _outputToLocal(const uint8_t* buf, size_t len);
     void parseByte(uint8_t c);
     void observeMavlinkPacket(const uint8_t* packet, size_t len);
-    void observeMavlinkMessage(uint32_t msgid, const uint8_t* packet, size_t len);
+    void observeMavlinkMessage(uint32_t msgid, const uint8_t* packet, size_t len,
+                               bool paramDelivered = true);
+    void resetParamTracking(bool listRequest);
+    void noteParamTransmitted(const uint8_t* packet, size_t len);
+    void discardQueuedSessionPackets(bool mission);
+    bool enqueueMissionPacket(const uint8_t* packet, size_t len);
+    void completeMissionPacket();
+    void resetMissionQueue(bool preserveInProgress = true);
     bool isSuppressedTelemetry(uint32_t msgid) const;
     void dropSuppressedTelemetryAtQueueHead();
 
@@ -170,7 +180,14 @@ private:
 
     // Dedicated Mission Cache: isolates mission protocol handshakes (MISSION_COUNT,
     // MISSION_REQUEST, MISSION_ITEM, MISSION_ACK) from STATUSTEXT and FIFO telemetry.
-    uint8_t  _missionCache[64];
+    // A bounded queue prevents a burst of mission handshake packets from replacing
+    // a packet that is already waiting for its reliable RF transfer.
+    static constexpr size_t MISSION_QUEUE_DEPTH = 4;
+    uint8_t  _missionCache[MISSION_QUEUE_DEPTH][64];
+    uint8_t  _missionLens[MISSION_QUEUE_DEPTH] = {};
+    uint8_t  _missionHead = 0;
+    uint8_t  _missionTail = 0;
+    uint8_t  _missionCount = 0;
     uint8_t  _missionLen = 0;
     bool     _missionPending = false;
     bool     _missionSending = false;
@@ -190,6 +207,7 @@ private:
         IN_FRAME
     };
     AirUplinkState _airUplinkState = AirUplinkState::IDLE;
+    uint8_t _airUplinkBuffer[296] = {};
     uint16_t _airUplinkExpectedLen = 0;
     uint16_t _airUplinkCount = 0;
     bool     _airUplinkInProgress = false;
@@ -201,4 +219,6 @@ private:
 
     RingBuffer _txQueue;
     size_t _fragmentRemaining = 0;
+    uint8_t _fragmentParamPacket[50] = {};
+    uint8_t _fragmentParamLen = 0;
 };

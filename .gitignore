@@ -37,6 +37,7 @@ tools/rc_calibration.json
 # Developer context notes
 context.md
 audit.md
+include/wifi_credentials_local.h
 
 # Python bytecode and caches
 __pycache__/

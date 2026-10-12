@@ -32,14 +32,51 @@
 #define LED_PIN_ON         HIGH
 #define LED_PIN_OFF        LOW
 
-// --- Wi-Fi Telemetry Settings (ESP32 Ground Unit only - Preserved for Future) ---
-#define ENABLE_WIFI_TELEMETRY    0
-#define WIFI_STA_SSID            "DISABLED_PLACEHOLDER_SSID"
-#define WIFI_STA_PASS            "DISABLED_PLACEHOLDER_PASSWORD"
+// --- Wi-Fi Telemetry Settings (ESP32 Ground Unit only) ---
+#ifndef ENABLE_WIFI_TELEMETRY
+#define ENABLE_WIFI_TELEMETRY    1
+#endif
+
+#ifndef WIFI_USE_LOCAL_CREDENTIALS
+#define WIFI_USE_LOCAL_CREDENTIALS 1
+#endif
+#if WIFI_USE_LOCAL_CREDENTIALS && defined(__has_include)
+#if __has_include("wifi_credentials_local.h")
+    #include "wifi_credentials_local.h"
+#endif
+#endif
+
+#ifndef WIFI_STA_SSID
+#define WIFI_STA_SSID            "YOUR_HOTSPOT_SSID_HERE"
+#endif
+#ifndef WIFI_STA_PASS
+#define WIFI_STA_PASS            "YOUR_HOTSPOT_PASSWORD_HERE"
+#endif
+#ifndef WIFI_AP_SSID
 #define WIFI_AP_SSID             "Dual-LRS-Ground"
-#define WIFI_AP_PASS             "DISABLED_PLACEHOLDER_PASSWORD"
-#define WIFI_UDP_PORT            14550
-#define WIFI_CONNECT_TIMEOUT_MS  4000   // 4s timeout before auto-fallback to AP mode
+#endif
+#ifndef WIFI_AP_PASS
+#define WIFI_AP_PASS             "CHANGE_ME_AP_PASSWORD"
+#endif
+
+#ifndef WIFI_UDP_PORT
+#define WIFI_UDP_PORT            14550 // Local listen and discovery destination port
+#endif
+#ifndef WIFI_GCS_UDP_PORT
+#define WIFI_GCS_UDP_PORT        0     // 0: reply to source port; override for split TX/RX sockets
+#endif
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER            WIFI_POWER_19_5dBm // Maximum ESP32 TX power for stable GCS routing
+#endif
+#ifndef WIFI_CONNECT_TIMEOUT_MS
+#define WIFI_CONNECT_TIMEOUT_MS  10000 // Async STA deadline before AP fallback
+#endif
+#ifndef WIFI_CLIENT_INACTIVITY_TIMEOUT_MS
+#define WIFI_CLIENT_INACTIVITY_TIMEOUT_MS 15000
+#endif
+#define WIFI_RX_MAX_PACKETS_PER_UPDATE 2
+#define WIFI_RX_BUDGET_US        1000  // Checked between datagrams; never split an ingest
+#define WIFI_UDP_MAX_PAYLOAD_BYTES 1460 // Arduino ESP32 WiFiUDP buffer limit
 
 #else
 // --- Pin Definitions (STM32F411CE BlackPill) ---
@@ -107,8 +144,12 @@
 //   11 = 21 dBm (125 mW)         - Minimum power (Bench testing < 2m separation)
 #define E22_TX_POWER_MIN       3  // Register bits 11 = 21 dBm (125 mW)
 #define E22_TX_POWER_BENCH     3  // Register bits 11 = 21 dBm (125 mW) - prevents receiver LNA saturation
-#define E22_TX_POWER_FLIGHT    0  // Register bits 00 = 30 dBm (1000 mW) - maximum range for flight
-#define E22_ACTIVE_TX_POWER    E22_TX_POWER_BENCH // Active power: change to E22_TX_POWER_FLIGHT for real flight
+#define E22_TX_POWER_FLIGHT    0  // Register bits 00 = 30 dBm (1000 mW) - maximum flight range
+#if defined(DUAL_LRS_ROLE_GROUND)
+#define E22_ACTIVE_TX_POWER    E22_TX_POWER_BENCH  // Ground Unit on USB: 21 dBm (125 mW) prevents USB overcurrent & receiver saturation
+#else
+#define E22_ACTIVE_TX_POWER    E22_TX_POWER_FLIGHT // Air Unit on Vehicle BEC: 30 dBm (1000 mW / 1 W) maximum flight range
+#endif
 
 // --- TDM Protocol Schedule Profiles ---
 // Profile 0: 90.0 ms (11.1 Hz) - Telemetry Heavy (Phase 2 Legacy Baseline)

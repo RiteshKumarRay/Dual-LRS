@@ -772,6 +772,65 @@ bool test_stale_ack_after_transfer_completed_ignored() {
 }
 
 // =============================================================================
+// TEST 20: Lost final ACK is replayed after application consumption
+// =============================================================================
+bool test_lost_final_ack_replay_after_consumption() {
+    LinkTransport sender(TransportNodeRole::GROUND);
+    LinkTransport receiver(TransportNodeRole::AIR);
+    uint8_t msg[] = {0xFD, 0x01, 0x02, 0x03};
+    uint8_t frame[TRANSPORT_MAX_FRAME_SIZE] = {};
+    uint8_t ack[TRANSPORT_MAX_FRAME_SIZE] = {};
+
+    TEST_ASSERT(sender.start_transfer(TransportChannel::MAVLINK_UPLINK, msg, sizeof(msg), true),
+                "start_transfer failed");
+    size_t frame_len = sender.get_next_tx_frame(frame, 1, 1000);
+    TEST_ASSERT(frame_len > 0, "sender produced no frame");
+
+    TransportHeader hdr{};
+    transport_decode_header(frame, &hdr);
+    TEST_ASSERT(receiver.ingest_transport_frame(hdr, &frame[TRANSPORT_HEADER_SIZE],
+                                                hdr.payload_length, 1010),
+                "receiver rejected original frame");
+    TEST_ASSERT(receiver.has_received_message(), "receiver must complete original transfer");
+
+    uint8_t delivered[32] = {};
+    TEST_ASSERT(receiver.get_received_message(delivered, sizeof(delivered)) == sizeof(msg),
+                "original message length mismatch");
+    receiver.pop_received_message();
+    TEST_ASSERT(!receiver.has_received_message(), "application message should be consumed");
+
+    // Drop the original ACK and force the sender to retransmit the exact frame.
+    receiver.get_next_tx_frame(ack, 2, 1015);
+    sender.update(1205);
+    size_t retry_len = sender.get_next_tx_frame(frame, 3, 1205);
+    TEST_ASSERT(retry_len == frame_len, "retry length mismatch");
+
+    transport_decode_header(frame, &hdr);
+    TEST_ASSERT(receiver.ingest_transport_frame(hdr, &frame[TRANSPORT_HEADER_SIZE],
+                                                hdr.payload_length, 1210),
+                "receiver rejected replayed final fragment");
+    TEST_ASSERT(!receiver.has_received_message(),
+                "replayed final fragment must not redeliver application message");
+    TEST_ASSERT(receiver.has_pending_ack_nack(), "replay must queue an idempotent ACK");
+
+    size_t replay_ack_len = receiver.get_next_tx_frame(ack, 4, 1215);
+    TEST_ASSERT(replay_ack_len > 0, "receiver produced no replay ACK");
+    TransportHeader ack_hdr{};
+    transport_decode_header(ack, &ack_hdr);
+    TransportLinkAckNack ack_payload{};
+    TEST_ASSERT(transport_decode_link_ack_nack(&ack[TRANSPORT_HEADER_SIZE], &ack_payload),
+                "replay ACK payload decode failed");
+    TEST_ASSERT(ack_payload.nack_reason == (uint8_t)TransportNackReason::NONE,
+                "replay must produce ACK, not GAP_DETECTED");
+    TEST_ASSERT(sender.ingest_transport_frame(ack_hdr, &ack[TRANSPORT_HEADER_SIZE],
+                                              ack_hdr.payload_length, 1220),
+                "sender rejected replay ACK");
+    TEST_ASSERT(!sender.is_tx_active(), "sender should complete after replay ACK");
+    std::cout << "  [PASS] test_lost_final_ack_replay_after_consumption" << std::endl;
+    return true;
+}
+
+// =============================================================================
 // MAIN ENTRY
 // =============================================================================
 int main() {
@@ -799,10 +858,11 @@ int main() {
     all_passed &= test_nack_wrong_fragment_offset_ignored();
     all_passed &= test_wrong_channel_ack_nack_ignored();
     all_passed &= test_stale_ack_after_transfer_completed_ignored();
+    all_passed &= test_lost_final_ack_replay_after_consumption();
 
     std::cout << "===============================================================" << std::endl;
     if (all_passed) {
-        std::cout << "ALL 19 RELIABLE LINK TRANSPORT TESTS PASSED (100% SUCCESS)!" << std::endl;
+        std::cout << "ALL 20 RELIABLE LINK TRANSPORT TESTS PASSED (100% SUCCESS)!" << std::endl;
         std::cout << "===============================================================" << std::endl;
         return 0;
     } else {

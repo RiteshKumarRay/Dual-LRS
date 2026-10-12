@@ -228,9 +228,12 @@ size_t TransportFragmenter::get_next_fragment(uint8_t* out_frame_buf, uint16_t s
 TransportReassembler::TransportReassembler()
     : has_active_transfer_(false), is_complete_(false),
       active_channel_(TransportChannel::MAVLINK_DOWNLINK), active_transfer_id_(0),
-      last_activity_time_ms_(0), total_size_(0), range_count_(0), stats_{} {
+      last_activity_time_ms_(0), total_size_(0), range_count_(0),
+      replay_valid_(false), replay_channel_(TransportChannel::MAVLINK_DOWNLINK),
+      replay_transfer_id_(0), replay_range_count_(0), stats_{} {
     memset(reassembly_buffer_, 0, sizeof(reassembly_buffer_));
     memset(ranges_, 0, sizeof(ranges_));
+    memset(replay_ranges_, 0, sizeof(replay_ranges_));
 }
 
 void TransportReassembler::reset() {
@@ -240,9 +243,19 @@ void TransportReassembler::reset() {
     last_activity_time_ms_ = 0;
     total_size_ = 0;
     range_count_ = 0;
+    replay_valid_ = false;
+    replay_transfer_id_ = 0;
+    replay_range_count_ = 0;
 }
 
 void TransportReassembler::mark_complete_consumed() {
+    if (has_active_transfer_ && is_complete_) {
+        replay_valid_ = true;
+        replay_channel_ = active_channel_;
+        replay_transfer_id_ = active_transfer_id_;
+        replay_range_count_ = range_count_;
+        memcpy(replay_ranges_, ranges_, sizeof(replay_ranges_));
+    }
     has_active_transfer_ = false;
     is_complete_ = false;
     active_transfer_id_ = 0;
@@ -290,11 +303,28 @@ TransportNackReason TransportReassembler::process_fragment(const TransportHeader
     uint16_t u16_end = (uint16_t)end;
 
     if (!has_active_transfer_) {
+        // The application may already have consumed the completed transfer
+        // when the sender's final ACK was lost. Re-ACK an exact retransmission
+        // from that transfer, but never recreate an application message.
+        if (replay_valid_ && hdr.channel == (uint8_t)replay_channel_ &&
+            hdr.transfer_id == replay_transfer_id_) {
+            for (uint8_t r = 0; r < replay_range_count_; ++r) {
+                if (replay_ranges_[r].start == u16_start &&
+                    replay_ranges_[r].end == u16_end) {
+                    stats_.duplicates_received++;
+                    return TransportNackReason::NONE;
+                }
+            }
+        }
+
         // Missing first fragment check when no transfer is active
         if (!(hdr.flags & TRANSPORT_FLAG_FIRST_FRAG)) {
             stats_.gaps_detected++;
             return TransportNackReason::GAP_DETECTED;
         }
+        // A different FIRST_FRAG starts a new transfer and invalidates the
+        // previous replay record.
+        replay_valid_ = false;
         // Initialize new transfer
         has_active_transfer_ = true;
         is_complete_ = false;

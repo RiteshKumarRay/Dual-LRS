@@ -43,7 +43,7 @@ The current verified baseline provides:
   parameter download, transfer-time background telemetry suppression, and
   bounded normal-mode telemetry aggregation.
 * Host tests and embedded build targets for the transport, RC, TDM, and
-  telemetry-gating layers (58/58 host tests passing).
+  telemetry-gating layers (69/69 host tests passing).
 
 Production reliable transport (`LinkTransport`) is implemented with
 stop-and-wait lockstep fragmentation, 200 ms RTO, 5-retry limits, and
@@ -273,9 +273,10 @@ matrix.
 The native Stage 3.2 tests use simulated radio delivery and are complemented by
 propellers-off Radxa/ArduPilot bench validation. Mission upload/download,
 full parameter download, RC health, and steady-state telemetry have been live
-verified. ACK/NACK generation and retry scheduling are not yet fully integrated
-into the production runtime, so packet-loss recovery, reconnection, and
-saturated-link guarantees remain unverified.
+verified. Production ACK/NACK generation and retry scheduling are integrated;
+host coverage includes timeout, CRC rejection, strict ACK/NACK matching, and
+post-consumption final-ACK replay. Live impaired-RF recovery and flight
+acceptance remain unverified.
 
 Keep propellers removed for further validation. Flight acceptance still
 requires intentional RF cut-and-restore tests, FC failsafe confirmation, and

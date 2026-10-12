@@ -39,11 +39,10 @@
     static RcGroundAdapter rcGroundAdapter;
 #endif
 
-// [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
-// #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
-// #include "wifi_telemetry.h"
-// static WifiTelemetry wifiTelem;
-// #endif
+#if defined(ESP32) && (defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1))
+#include "wifi_telemetry.h"
+static WifiTelemetry wifiTelem;
+#endif
 
 // Drivers and Handlers
 E22Driver radio(SerialRadio, PIN_RADIO_M0, PIN_RADIO_M1, PIN_RADIO_AUX);
@@ -164,7 +163,7 @@ void onTransportFrameReceived(const TransportHeader& hdr, const uint8_t* payload
 
 #if defined(DUAL_LRS_ROLE_AIR)
 // Build and send a REQUEST_DATA_STREAM packet directly to the FC.
-// Ensures QGC gets battery, GPS, attitude even before parameter download completes.
+// Establish normal-mode telemetry rates when bulk transfers are idle.
 static void requestStream(Stream& port, uint8_t streamId, uint16_t rateHz) {
     static uint8_t seq = 0;
     uint8_t packet[14]; // 6 header + 6 payload + 2 CRC
@@ -256,7 +255,6 @@ static void sendCrsfDeviceInfoReply(uint32_t baud) {
 
 void setup() {
     #if defined(ESP32)
-        WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout detector
         Serial.setRxBufferSize(2048);
         Serial2.setRxBufferSize(2048);
     #endif
@@ -294,6 +292,13 @@ void setup() {
     tdm.onTransportFrameReceived(onTransportFrameReceived);
     tdm.begin();
     telemHandler.begin();
+
+    #if defined(ESP32) && (defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1))
+    wifiTelem.begin();
+    telemHandler.setOutputCallback([](const uint8_t* data, size_t len) {
+        wifiTelem.sendMavlinkPacket(data, len);
+    });
+    #endif
 }
 
 void loop() {
@@ -408,10 +413,9 @@ void loop() {
 
     linkTransport.update(now);
 
-    // [WIFI TELEMETRY - PRESERVED FOR FUTURE USE]
-    // #if defined(ESP32) && defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1)
-    // wifiTelem.update(telemHandler);
-    // #endif
+    #if defined(ESP32) && (defined(ENABLE_WIFI_TELEMETRY) && (ENABLE_WIFI_TELEMETRY == 1))
+    wifiTelem.update(telemHandler);
+    #endif
 
     #if defined(DUAL_LRS_ROLE_AIR) && defined(USBCON)
     // USB command handler: ESC (0x1B) resets the BlackPill into DFU bootloader mode.
@@ -441,7 +445,8 @@ void loop() {
     #if (!defined(DUAL_LRS_STAGE31_RC_ONLY) || (DUAL_LRS_STAGE31_RC_ONLY == 0))
     // Request telemetry streams from ArduPilot on startup (or after baud switch).
     static uint32_t lastStreamReqMs = 0;
-    if ((reqCount < 8 || (now - telemHandler.lastValidPacketMs() > 5000)) && (now - lastStreamReqMs >= 2500)) {
+    if (!telemHandler.isTelemetrySuppressed() &&
+        (reqCount < 8 || (now - telemHandler.lastValidPacketMs() > 5000)) && (now - lastStreamReqMs >= 2500)) {
         lastStreamReqMs = now;
         if (reqCount < 8) reqCount++;
         requestStream(SerialTELEM, 2,  1); // SYS_STATUS (Battery)    at 1 Hz
@@ -525,7 +530,16 @@ void loop() {
                 // During active mission transfer or pending ACK, boost GCS uplink to 1 slot every 2 cycles (slotsSinceRc >= 1)
                 // so waypoint handshakes and ACKs execute 2x faster (180ms round-trip) without starving RC.
                 // In normal telemetry mode, allow 1 GCS slot every 4 cycles (slotsSinceRc >= 3) to minimize RC jitter.
-                uint8_t maxRcSlots = (telemHandler.isMissionActive() || linkTransport.has_pending_ack_nack()) ? 1 : 3;
+                // A pending ACK/NACK is the completion handshake for the
+                // previous RF transfer. Send it in the next Ground slot;
+                // delaying it behind another RC frame halves reliable
+                // parameter throughput and needlessly extends retries. This
+                // skips at most one fresh RF RC opportunity, well inside the
+                // FC's failsafe window. Ordinary MAVLink data still yields to
+                // the normal RC interleave policy.
+                uint8_t maxRcSlots = linkTransport.has_pending_ack_nack()
+                                     ? 0
+                                     : (telemHandler.isMissionActive() ? 1 : 3);
                 if (has_rc && mavlink_ready && slotsSinceRc >= maxRcSlots) {
                     send_rc = false;
                     slotsSinceRc = 0;
@@ -565,7 +579,15 @@ void loop() {
                 if (!linkTransport.is_tx_active() && !linkTransport.has_pending_ack_nack()) {
                     size_t pkt_len = telemHandler.getNormalTelemetryPayload(airTxMsgBuf, sizeof(airTxMsgBuf));
                     if (pkt_len > 0) {
-                        bool reliable = (pkt_len > 49) || telemHandler.isMissionActive();
+                        // Parameter values are individually bounded MAVLink
+                        // frames (normally <49 bytes), but the full table is
+                        // an application-level reliable transfer. Keep the
+                        // parameter gate active until each distinct value has
+                        // been acknowledged and delivered; routine telemetry
+                        // remains suppressed throughout the list transfer.
+                        bool reliable = (pkt_len > 49) ||
+                                        telemHandler.isMissionActive() ||
+                                        telemHandler.isParamDownloadActive();
                         linkTransport.start_transfer(TransportChannel::MAVLINK_DOWNLINK, airTxMsgBuf, (uint16_t)pkt_len, reliable);
                     }
                 }
@@ -607,8 +629,9 @@ void loop() {
     if (now - lastStatusInjectMs >= 500) {
         lastStatusInjectMs = now;
         size_t queued = telemHandler.pendingBytes();
-        // Scale txbuf to actual 48KB buffer size (49152 bytes):
-        // 1037 parameters * 37B = ~38KB total table, fits completely in RAM without freezing
+        // Scale txbuf to the actual 48KB buffer size (49152 bytes). Keep this
+        // independent of the FC's parameter count; boards expose different
+        // active-table sizes.
         uint8_t txbufPct = 96;
         if (queued > 40000) {
             txbufPct = 10;  // Emergency: buffer nearly full (>80%)

@@ -161,6 +161,17 @@ private:
     };
     ReceivedRange ranges_[TRANSPORT_MAX_FRAGMENTS];
     uint8_t range_count_;
+
+    // Keep a bounded identity of the last delivered transfer after the
+    // application consumes it. If its final ACK is lost, the sender can
+    // retransmit the final fragment; that duplicate must be ACKed again
+    // without being delivered to the application a second time.
+    bool replay_valid_;
+    TransportChannel replay_channel_;
+    uint16_t replay_transfer_id_;
+    ReceivedRange replay_ranges_[TRANSPORT_MAX_FRAGMENTS];
+    uint8_t replay_range_count_;
+
     TransportReassemblerStats stats_;
 
     bool check_coverage();
