@@ -1,5 +1,4 @@
-# Binary media (photos, schematics)
-image/
+# Binary media (photos, schematics) is tracked when intentionally added.
 
 # PlatformIO build artifacts
 .pio/
@@ -38,6 +37,13 @@ tools/rc_calibration.json
 context.md
 audit.md
 include/wifi_credentials_local.h
+
+# Local engineering notes and evolving acceptance records
+docs/CURRENT_STATUS.md
+audit/
+approach.md
+docs/PHASE_2_STATE_MACHINES.md
+docs/PHASE_2_TRANSPORT_SPEC.md
 
 # Python bytecode and caches
 __pycache__/

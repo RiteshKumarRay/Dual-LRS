@@ -53,7 +53,24 @@ flight acceptance remain open.
 
 ---
 
-## 2. Key Architecture & Features
+## 2. Hardware Gallery
+
+### Dual-LRS Air and Ground Modules
+
+The assembled STM32 Air unit and ESP32 Ground unit use external antennas for
+the Ebyte E22-900T30D radio link.
+
+![Dual-LRS Air and Ground modules](image/Dual_LRS_both_modules.jpeg)
+
+### Ground Unit Mounted on the FS-i6X/OpenTX Handset
+
+The ESP32 Ground unit is shown mounted on the RC handset for field operation.
+
+![Dual-LRS Ground unit mounted on FS-i6X/OpenTX handset](image/Dual_LRS_Ground_fsi6x_openTX.jpeg)
+
+---
+
+## 3. Key Architecture & Features
 
 ### A. Deterministic 90 ms TDM Scheduler (approximately 11.1 Hz fresh RF cycle)
 * **Ground Transmit Slot (32 ms / 0.0 – 32.0 ms):** Transmits packed RC control frames (`RC_CONTROL`) from the handset, with bounded interleaving for GCS uplink commands and Link Control sync frames.
@@ -85,7 +102,7 @@ The Air unit acts as a time slave, locking its local microsecond clock to Ground
 
 ---
 
-## 3. Hardware Bill of Materials (BOM)
+## 4. Hardware Bill of Materials (BOM)
 
 | Component | Role | Details | Approx. Cost |
 | :--- | :--- | :--- | :---: |
@@ -98,7 +115,7 @@ The Air unit acts as a time slave, locking its local microsecond clock to Ground
 
 ---
 
-## 4. Hardware Wiring & Pinout
+## 5. Hardware Wiring & Pinout
 
 ### Air Unit: STM32F411 BlackPill + Ebyte E22-900T30D + FC
 
@@ -160,7 +177,7 @@ Computer USB Port                     ESP32 Dev Module
 
 ---
 
-## 5. Building & Flashing (PlatformIO)
+## 6. Building & Flashing (PlatformIO)
 
 ### Prerequisites
 * Install [PlatformIO Core (CLI)](https://docs.platformio.org/en/latest/core/installation/index.html) or [PlatformIO IDE for VS Code](https://platformio.org/install/ide?install=vscode).
@@ -192,7 +209,7 @@ pio run -e dual_lrs_ground_esp32 --target upload
 
 ---
 
-## 6. ArduPilot & GCS Configuration
+## 7. ArduPilot & GCS Configuration
 
 ### ArduPilot Parameters
 Connect your flight controller to QGroundControl or Mission Planner and set the following parameters for the serial port connected to the Dual-LRS Air Unit (e.g. `SERIAL1` for `TELEM1`):
@@ -222,7 +239,7 @@ Connect your flight controller to QGroundControl or Mission Planner and set the 
 
 ---
 
-## 7. Historical Hardware Observations
+## 8. Historical Hardware Observations
 
 The older parameter-download and latency figures below are retained as
 operator-reported historical observations only. They are not current acceptance
@@ -351,7 +368,7 @@ fresh RC frame whenever one is available.
 
 ---
 
-## 8. Repository Layout
+## 9. Repository Layout
 
 ```text
 Dual-LRS/
@@ -385,7 +402,7 @@ Dual-LRS/
 
 ---
 
-## 9. Technical Specifications
+## 10. Technical Specifications
 
 | Parameter | Specification |
 | :--- | :--- |
@@ -406,7 +423,7 @@ Dual-LRS/
 
 ---
 
-## 10. License & Credits
+## 11. License & Credits
 
 * **License:** [MIT License](LICENSE)
 * **Author:** [Ritesh Kumar Ray](https://github.com/RiteshKumarRay)
